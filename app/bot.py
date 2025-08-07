@@ -185,7 +185,7 @@ async def handle_manual_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     # Manual timezone entry
-    if context.chat_data.get("awaiting_timezone_manual"):
+    if context.chat_data.get("awaiting_timezone_manual") or context.user_data.get("awaiting_timezone_manual"):
         try:
             ZoneInfo(text)
         except Exception:
@@ -196,6 +196,7 @@ async def handle_manual_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             set_user_timezone(session, update.effective_user.id, text)
             session.commit()
         context.chat_data["awaiting_timezone_manual"] = False
+        context.user_data["awaiting_timezone_manual"] = False
         await update.message.reply_text(f"Часовой пояс обновлён: {text}")
         return
 
@@ -222,6 +223,23 @@ async def cmd_target(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def cmd_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    assert update.message is not None
+    # Direct argument mode: /timezone Europe/Paris
+    if context.args:
+        tzid = context.args[0]
+        try:
+            ZoneInfo(tzid)
+        except Exception:
+            await update.message.reply_text("Неизвестный TZ. Пример: Europe/Moscow, Europe/Berlin, Asia/Almaty")
+            return
+        if update.effective_user:
+            with get_session() as session:
+                get_or_create_user(session, update.effective_user.id, DEFAULT_TZ)
+                set_user_timezone(session, update.effective_user.id, tzid)
+                session.commit()
+        await update.message.reply_text(f"Часовой пояс обновлён: {tzid}")
+        return
+
     await update.message.reply_text(
         "Выбери часовой пояс или укажи другой:", reply_markup=tz_keyboard()
     )
@@ -231,30 +249,36 @@ async def handle_tz_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     query = update.callback_query
     if not query:
         return
-    await query.answer()
-    data = query.data or ""
-    _, choice = data.split(":", 1) if ":" in data else ("", "")
-    if choice == "other":
-        context.chat_data["awaiting_timezone_manual"] = True
-        if query.message:
-            await query.message.reply_text(
-                "Введи часовой пояс в формате Europe/Moscow, Europe/Berlin, Asia/Almaty"
-            )
-        return
-    # set selected tz
     try:
-        ZoneInfo(choice)
-    except Exception:
+        await query.answer()
+        data = query.data or ""
+        _, choice = data.split(":", 1) if ":" in data else ("", "")
+        if choice == "other":
+            context.chat_data["awaiting_timezone_manual"] = True
+            context.user_data["awaiting_timezone_manual"] = True
+            if query.message:
+                await query.message.reply_text(
+                    "Введи часовой пояс в формате Europe/Moscow, Europe/Berlin, Asia/Almaty"
+                )
+            return
+        # set selected tz
+        try:
+            ZoneInfo(choice)
+        except Exception:
+            if query.message:
+                await query.message.reply_text("Неизвестный TZ. Пример: Europe/Moscow, Europe/Berlin, Asia/Almaty")
+            return
+        if update.effective_user:
+            with get_session() as session:
+                get_or_create_user(session, update.effective_user.id, DEFAULT_TZ)
+                set_user_timezone(session, update.effective_user.id, choice)
+                session.commit()
         if query.message:
-            await query.message.reply_text("Неизвестный TZ. Пример: Europe/Moscow, Europe/Berlin, Asia/Almaty")
-        return
-    if update.effective_user:
-        with get_session() as session:
-            get_or_create_user(session, update.effective_user.id, DEFAULT_TZ)
-            set_user_timezone(session, update.effective_user.id, choice)
-            session.commit()
-    if query.message:
-        await query.message.reply_text(f"Часовой пояс обновлён: {choice}")
+            await query.message.reply_text(f"Часовой пояс обновлён: {choice}")
+    except Exception as e:
+        logger.exception("handle_tz_choice error: %s", e)
+        if query and query.message:
+            await query.message.reply_text("Не удалось обновить часовой пояс. Попробуйте ещё раз.")
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
