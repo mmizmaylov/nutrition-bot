@@ -130,7 +130,9 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def handle_manual_calories(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.effective_user:
         return
-    if not context.user_data.get("awaiting_manual_calories"):
+    awaiting_onboarding = context.user_data.get("awaiting_manual_calories")
+    awaiting_set = context.user_data.get("awaiting_setcalories")
+    if not (awaiting_onboarding or awaiting_set):
         return
     text = (update.message.text or "").strip()
     try:
@@ -147,6 +149,7 @@ async def handle_manual_calories(update: Update, context: ContextTypes.DEFAULT_T
         session.commit()
 
     context.user_data["awaiting_manual_calories"] = False
+    context.user_data["awaiting_setcalories"] = False
     context.user_data.pop("proposed_calories", None)
 
     await update.message.reply_text(
@@ -159,7 +162,8 @@ async def cmd_setcalories(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     assert update.message is not None
     assert update.effective_user is not None
     if not context.args:
-        await update.message.reply_text("Использование: /setcalories <ккал>, например: /setcalories 2000")
+        context.user_data["awaiting_setcalories"] = True
+        await update.message.reply_text("Введи желаемый дневной лимит в ккал (целое число), например: 2000")
         return
     try:
         target = int(context.args[0])
