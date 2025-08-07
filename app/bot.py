@@ -200,6 +200,9 @@ async def handle_manual_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(f"Часовой пояс обновлён: {text}")
         return
 
+    # If none of the above matched and it's plain text, ignore silently
+    return
+
 
 async def cmd_target(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     assert update.message is not None
@@ -224,6 +227,7 @@ async def cmd_target(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def cmd_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     assert update.message is not None
+    assert update.effective_user is not None
     # Direct argument mode: /timezone Europe/Paris
     if context.args:
         tzid = context.args[0]
@@ -232,11 +236,10 @@ async def cmd_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         except Exception:
             await update.message.reply_text("Неизвестный TZ. Пример: Europe/Moscow, Europe/Berlin, Asia/Almaty")
             return
-        if update.effective_user:
-            with get_session() as session:
-                get_or_create_user(session, update.effective_user.id, DEFAULT_TZ)
-                set_user_timezone(session, update.effective_user.id, tzid)
-                session.commit()
+        with get_session() as session:
+            get_or_create_user(session, update.effective_user.id, DEFAULT_TZ)
+            set_user_timezone(session, update.effective_user.id, tzid)
+            session.commit()
         await update.message.reply_text(f"Часовой пояс обновлён: {tzid}")
         return
 
@@ -252,7 +255,12 @@ async def handle_tz_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     try:
         await query.answer()
         data = query.data or ""
-        _, choice = data.split(":", 1) if ":" in data else ("", "")
+        parts = data.split(":", 1)
+        if len(parts) != 2 or parts[0] != "tz":
+            if query.message:
+                await query.message.reply_text("Некорректные данные выбора. Попробуйте ещё раз: /timezone")
+            return
+        choice = parts[1]
         if choice == "other":
             context.chat_data["awaiting_timezone_manual"] = True
             context.user_data["awaiting_timezone_manual"] = True
