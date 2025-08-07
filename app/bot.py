@@ -6,9 +6,9 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, CallbackQueryHandler, filters
 
 from app.db import get_session, init_db, get_or_create_user, set_user_calorie_target, set_user_timezone, get_today_totals
 from app.db import add_meal
@@ -22,6 +22,43 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 DEFAULT_TZ = os.getenv("DEFAULT_TIMEZONE", "Europe/Moscow")
 
+GOAL_TO_PROPOSAL = {
+    "lose": {
+        "range_text": "Для похудения я рекомендую 1400–1600 ккал в день.",
+        "proposed": 1500,
+        "emoji_title": "🥗 Похудение",
+    },
+    "maintain": {
+        "range_text": "Для поддержания веса рекомендую 1800–2200 ккал в день.",
+        "proposed": 2000,
+        "emoji_title": "⚖️ Поддержание веса",
+    },
+    "gain": {
+        "range_text": "Для набора массы рекомендую 2300–2800 ккал в день.",
+        "proposed": 2500,
+        "emoji_title": "💪 Набор массы",
+    },
+}
+
+
+def goals_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(text="🥗 Похудение", callback_data="goal:lose"),
+            InlineKeyboardButton(text="⚖️ Поддержание", callback_data="goal:maintain"),
+            InlineKeyboardButton(text="💪 Набор массы", callback_data="goal:gain"),
+        ]
+    ])
+
+
+def confirm_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(text="Да", callback_data="confirm:yes"),
+            InlineKeyboardButton(text="Изменить", callback_data="confirm:edit"),
+        ]
+    ])
+
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     assert update.effective_user is not None
@@ -29,12 +66,92 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     with get_session() as session:
         user = get_or_create_user(session, user_id, DEFAULT_TZ)
         session.commit()
+    greeting = (
+        "👋 Привет!\n"
+        "Я помогу тебе следить за питанием по фото 📸🍽️\n"
+        "Сначала выбери свою цель:"
+    )
+    await update.message.reply_text(greeting, reply_markup=goals_keyboard())
+
+
+async def handle_goal_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    data = query.data or ""
+    goal = data.split(":", 1)[1] if ":" in data else ""
+    cfg = GOAL_TO_PROPOSAL.get(goal)
+    if not cfg:
+        return
+
+    proposed = cfg["proposed"]
+    context.user_data["proposed_calories"] = proposed
+    context.user_data["awaiting_manual_calories"] = False
+
+    text = (
+        f"Отлично! {cfg['range_text']}\n"
+        f"Установим лимит {proposed} ккал?"
+    )
+    if query.message:
+        await query.message.reply_text(text, reply_markup=confirm_keyboard())
+
+
+async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    data = query.data or ""
+    action = data.split(":", 1)[1] if ":" in data else ""
+
+    if action == "yes":
+        proposed = context.user_data.get("proposed_calories")
+        if isinstance(proposed, int) and update.effective_user:
+            with get_session() as session:
+                get_or_create_user(session, update.effective_user.id, DEFAULT_TZ)
+                set_user_calorie_target(session, update.effective_user.id, proposed)
+                session.commit()
+            msg = (
+                f"✅ Готово! Твой дневной лимит: {proposed} ккал\n"
+                "Теперь просто присылай мне фото еды — я скажу, что в тарелке, оценю калорийность и подскажу, сколько осталось до конца дня 💪"
+            )
+            if query.message:
+                await query.message.reply_text(msg)
+        context.user_data.pop("proposed_calories", None)
+        context.user_data["awaiting_manual_calories"] = False
+
+    elif action == "edit":
+        context.user_data["awaiting_manual_calories"] = True
+        if query.message:
+            await query.message.reply_text("Введи желаемый дневной лимит в ккал (целое число), например: 1800")
+
+
+async def handle_manual_calories(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.effective_user:
+        return
+    if not context.user_data.get("awaiting_manual_calories"):
+        return
+    text = (update.message.text or "").strip()
+    try:
+        target = int(text)
+        if target <= 0:
+            raise ValueError
+    except Exception:
+        await update.message.reply_text("Пожалуйста, введи положительное целое число, например: 1800")
+        return
+
+    with get_session() as session:
+        get_or_create_user(session, update.effective_user.id, DEFAULT_TZ)
+        set_user_calorie_target(session, update.effective_user.id, target)
+        session.commit()
+
+    context.user_data["awaiting_manual_calories"] = False
+    context.user_data.pop("proposed_calories", None)
+
     await update.message.reply_text(
-        "Привет! Я помогу отслеживать питание по фото. Укажи дневной лимит калорий командой:\n"
-        "/setcalories 2000\n\n"
-        "Часовой пояс можно сменить: /settz Europe/Moscow\n"
-        "Покажи статус: /status\n\n"
-        "Теперь просто пришли мне фото еды."
+        f"✅ Готово! Твой дневной лимит: {target} ккал\n"
+        "Теперь просто присылай мне фото еды — я скажу, что в тарелке, оценю калорийность и подскажу, сколько осталось до конца дня 💪"
     )
 
 
@@ -192,6 +309,10 @@ def main() -> None:
     application = Application.builder().token(token).build()
 
     application.add_handler(CommandHandler("start", cmd_start))
+    application.add_handler(CallbackQueryHandler(handle_goal_choice, pattern=r"^goal:(lose|maintain|gain)$"))
+    application.add_handler(CallbackQueryHandler(handle_confirm, pattern=r"^confirm:(yes|edit)$"))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_manual_calories))
+
     application.add_handler(CommandHandler("setcalories", cmd_setcalories))
     application.add_handler(CommandHandler("settz", cmd_settz))
     application.add_handler(CommandHandler("status", cmd_status))
