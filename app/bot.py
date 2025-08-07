@@ -4,6 +4,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
+import re
 
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -86,8 +87,8 @@ async def handle_goal_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     proposed = cfg["proposed"]
-    context.user_data["proposed_calories"] = proposed
-    context.user_data["awaiting_manual_calories"] = False
+    context.chat_data["proposed_calories"] = proposed
+    context.chat_data["awaiting_manual_calories"] = False
 
     text = (
         f"Отлично! {cfg['range_text']}\n"
@@ -106,7 +107,7 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     action = data.split(":", 1)[1] if ":" in data else ""
 
     if action == "yes":
-        proposed = context.user_data.get("proposed_calories")
+        proposed = context.chat_data.get("proposed_calories")
         if isinstance(proposed, int) and update.effective_user:
             with get_session() as session:
                 get_or_create_user(session, update.effective_user.id, DEFAULT_TZ)
@@ -118,11 +119,11 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
             if query.message:
                 await query.message.reply_text(msg)
-        context.user_data.pop("proposed_calories", None)
-        context.user_data["awaiting_manual_calories"] = False
+        context.chat_data.pop("proposed_calories", None)
+        context.chat_data["awaiting_manual_calories"] = False
 
     elif action == "edit":
-        context.user_data["awaiting_manual_calories"] = True
+        context.chat_data["awaiting_manual_calories"] = True
         if query.message:
             await query.message.reply_text("Введи желаемый дневной лимит в ккал (целое число), например: 1800")
 
@@ -130,13 +131,18 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def handle_manual_calories(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.effective_user:
         return
-    awaiting_onboarding = context.user_data.get("awaiting_manual_calories")
-    awaiting_set = context.user_data.get("awaiting_setcalories")
+    awaiting_onboarding = context.chat_data.get("awaiting_manual_calories") or context.user_data.get("awaiting_manual_calories")
+    awaiting_set = context.chat_data.get("awaiting_setcalories") or context.user_data.get("awaiting_setcalories")
     if not (awaiting_onboarding or awaiting_set):
         return
     text = (update.message.text or "").strip()
+    # extract first integer from text
+    m = re.search(r"-?\d+", text)
+    if not m:
+        await update.message.reply_text("Пожалуйста, введи положительное целое число, например: 1800")
+        return
     try:
-        target = int(text)
+        target = int(m.group(0))
         if target <= 0:
             raise ValueError
     except Exception:
@@ -148,6 +154,10 @@ async def handle_manual_calories(update: Update, context: ContextTypes.DEFAULT_T
         set_user_calorie_target(session, update.effective_user.id, target)
         session.commit()
 
+    context.chat_data["awaiting_manual_calories"] = False
+    context.chat_data["awaiting_setcalories"] = False
+    context.chat_data.pop("proposed_calories", None)
+    # clean user_data legacy flags just in case
     context.user_data["awaiting_manual_calories"] = False
     context.user_data["awaiting_setcalories"] = False
     context.user_data.pop("proposed_calories", None)
@@ -162,7 +172,7 @@ async def cmd_setcalories(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     assert update.message is not None
     assert update.effective_user is not None
     if not context.args:
-        context.user_data["awaiting_setcalories"] = True
+        context.chat_data["awaiting_setcalories"] = True
         await update.message.reply_text("Введи желаемый дневной лимит в ккал (целое число), например: 2000")
         return
     try:
