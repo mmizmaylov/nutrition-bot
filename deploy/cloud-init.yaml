@@ -1,0 +1,39 @@
+#cloud-config
+package_update: true
+package_upgrade: true
+
+users:
+  - default
+
+write_files:
+  - path: /etc/nutrition-bot.env
+    owner: root:root
+    permissions: '0600'
+    content: |
+      TELEGRAM_BOT_TOKEN=REPLACE_TELEGRAM_BOT_TOKEN
+      OPENAI_API_KEY=REPLACE_OPENAI_API_KEY
+      OPENAI_VISION_MODEL=gpt-4o-mini
+      DEFAULT_TIMEZONE=Europe/Moscow
+  - path: /etc/cron.weekly/docker-prune
+    owner: root:root
+    permissions: '0755'
+    content: |
+      #!/bin/sh
+      /usr/bin/docker system prune -af --volumes >/dev/null 2>&1 || true
+
+runcmd:
+  - [ bash, -lc, 'apt-get update' ]
+  - [ bash, -lc, 'apt-get install -y ca-certificates curl gnupg git' ]
+  - [ bash, -lc, 'install -m 0755 -d /etc/apt/keyrings' ]
+  - [ bash, -lc, 'curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg' ]
+  - [ bash, -lc, 'chmod a+r /etc/apt/keyrings/docker.gpg' ]
+  - [ bash, -lc, 'echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] http://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" > /etc/apt/sources.list.d/docker.list' ]
+  - [ bash, -lc, 'apt-get update' ]
+  - [ bash, -lc, 'apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin' ]
+  - [ bash, -lc, 'systemctl enable --now docker' ]
+  - [ bash, -lc, 'mkdir -p /opt && cd /opt && git clone https://github.com/REPLACE_GITHUB_USERNAME/nutrition-bot.git || true' ]
+  - [ bash, -lc, 'cd /opt/nutrition-bot && cp -n /etc/nutrition-bot.env .env || true' ]
+  - [ bash, -lc, 'cd /opt/nutrition-bot && docker compose up -d --build' ]
+
+final_message: |
+  cloud-init завершён. Проверьте логи: sudo docker compose -f /opt/nutrition-bot/docker-compose.yml logs -f 
