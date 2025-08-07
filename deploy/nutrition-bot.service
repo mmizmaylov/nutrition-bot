@@ -1,0 +1,14 @@
+[Unit]
+Description=Nutrition Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/nutrition-bot
+EnvironmentFile=/etc/nutrition-bot.env
+ExecStart=/opt/nutrition-bot/.venv/bin/python -m app.bot
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target 

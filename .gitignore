@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+
+# Env and secrets
+.env
+.env.*
+!.env.example
+
+# OS
+.DS_Store
+
+# Venv
+.venv/
+venv/
+
+# Bytecode cache
+*.pyc
+
+# Local DB
+nutrition.db
+nutrition.db-journal
+
+# IDE
+.vscode/
+.idea/ 
