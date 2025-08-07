@@ -41,6 +41,12 @@ GOAL_TO_PROPOSAL = {
     },
 }
 
+COMMON_TZ = [
+    ("Europe/Moscow", "Europe/Madrid"),
+    ("Europe/Berlin", "Europe/London"),
+    ("Asia/Almaty", "Europe/Istanbul"),
+]
+
 
 def goals_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
@@ -59,6 +65,17 @@ def confirm_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="Изменить", callback_data="confirm:edit"),
         ]
     ])
+
+
+def tz_keyboard() -> InlineKeyboardMarkup:
+    rows = []
+    for left, right in COMMON_TZ:
+        rows.append([
+            InlineKeyboardButton(text=left, callback_data=f"tz:{left}"),
+            InlineKeyboardButton(text=right, callback_data=f"tz:{right}"),
+        ])
+    rows.append([InlineKeyboardButton(text="Другой часовой пояс", callback_data="tz:other")])
+    return InlineKeyboardMarkup(rows)
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -128,47 +145,62 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await query.message.reply_text("Введи желаемый дневной лимит в ккал (целое число), например: 1800")
 
 
-async def handle_manual_calories(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_manual_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.effective_user:
         return
+    text = (update.message.text or "").strip()
+
+    # Manual calories entry (onboarding or /target)
     awaiting_onboarding = context.chat_data.get("awaiting_manual_calories") or context.user_data.get("awaiting_manual_calories")
     awaiting_set = context.chat_data.get("awaiting_setcalories") or context.user_data.get("awaiting_setcalories")
-    if not (awaiting_onboarding or awaiting_set):
+    if awaiting_onboarding or awaiting_set:
+        m = re.search(r"-?\d+", text)
+        if not m:
+            await update.message.reply_text("Пожалуйста, введи положительное целое число, например: 1800")
+            return
+        try:
+            target = int(m.group(0))
+            if target <= 0:
+                raise ValueError
+        except Exception:
+            await update.message.reply_text("Пожалуйста, введи положительное целое число, например: 1800")
+            return
+
+        with get_session() as session:
+            get_or_create_user(session, update.effective_user.id, DEFAULT_TZ)
+            set_user_calorie_target(session, update.effective_user.id, target)
+            session.commit()
+
+        context.chat_data["awaiting_manual_calories"] = False
+        context.chat_data["awaiting_setcalories"] = False
+        context.chat_data.pop("proposed_calories", None)
+        context.user_data["awaiting_manual_calories"] = False
+        context.user_data["awaiting_setcalories"] = False
+        context.user_data.pop("proposed_calories", None)
+
+        await update.message.reply_text(
+            f"✅ Готово! Твой дневной лимит: {target} ккал\n"
+            "Теперь просто присылай мне фото еды — я скажу, что в тарелке, оценю калорийность и подскажу, сколько осталось до конца дня 💪"
+        )
         return
-    text = (update.message.text or "").strip()
-    # extract first integer from text
-    m = re.search(r"-?\d+", text)
-    if not m:
-        await update.message.reply_text("Пожалуйста, введи положительное целое число, например: 1800")
+
+    # Manual timezone entry
+    if context.chat_data.get("awaiting_timezone_manual"):
+        try:
+            ZoneInfo(text)
+        except Exception:
+            await update.message.reply_text("Неизвестный TZ. Пример: Europe/Moscow, Europe/Berlin, Asia/Almaty")
+            return
+        with get_session() as session:
+            get_or_create_user(session, update.effective_user.id, DEFAULT_TZ)
+            set_user_timezone(session, update.effective_user.id, text)
+            session.commit()
+        context.chat_data["awaiting_timezone_manual"] = False
+        await update.message.reply_text(f"Часовой пояс обновлён: {text}")
         return
-    try:
-        target = int(m.group(0))
-        if target <= 0:
-            raise ValueError
-    except Exception:
-        await update.message.reply_text("Пожалуйста, введи положительное целое число, например: 1800")
-        return
-
-    with get_session() as session:
-        get_or_create_user(session, update.effective_user.id, DEFAULT_TZ)
-        set_user_calorie_target(session, update.effective_user.id, target)
-        session.commit()
-
-    context.chat_data["awaiting_manual_calories"] = False
-    context.chat_data["awaiting_setcalories"] = False
-    context.chat_data.pop("proposed_calories", None)
-    # clean user_data legacy flags just in case
-    context.user_data["awaiting_manual_calories"] = False
-    context.user_data["awaiting_setcalories"] = False
-    context.user_data.pop("proposed_calories", None)
-
-    await update.message.reply_text(
-        f"✅ Готово! Твой дневной лимит: {target} ккал\n"
-        "Теперь просто присылай мне фото еды — я скажу, что в тарелке, оценю калорийность и подскажу, сколько осталось до конца дня 💪"
-    )
 
 
-async def cmd_setcalories(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_target(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     assert update.message is not None
     assert update.effective_user is not None
     if not context.args:
@@ -189,23 +221,40 @@ async def cmd_setcalories(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await update.message.reply_text(f"Дневной лимит установлен: {target} ккал")
 
 
-async def cmd_settz(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    assert update.message is not None
-    assert update.effective_user is not None
-    if not context.args:
-        await update.message.reply_text("Использование: /settz <TZID>, например: /settz Europe/Moscow")
+async def cmd_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(
+        "Выбери часовой пояс или укажи другой:", reply_markup=tz_keyboard()
+    )
+
+
+async def handle_tz_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query:
         return
-    tzid = context.args[0]
+    await query.answer()
+    data = query.data or ""
+    _, choice = data.split(":", 1) if ":" in data else ("", "")
+    if choice == "other":
+        context.chat_data["awaiting_timezone_manual"] = True
+        if query.message:
+            await query.message.reply_text(
+                "Введи часовой пояс в формате Europe/Moscow, Europe/Berlin, Asia/Almaty"
+            )
+        return
+    # set selected tz
     try:
-        ZoneInfo(tzid)
+        ZoneInfo(choice)
     except Exception:
-        await update.message.reply_text("Неизвестный TZID. Пример: Europe/Moscow, Europe/Berlin, Asia/Almaty")
+        if query.message:
+            await query.message.reply_text("Неизвестный TZ. Пример: Europe/Moscow, Europe/Berlin, Asia/Almaty")
         return
-    with get_session() as session:
-        get_or_create_user(session, update.effective_user.id, DEFAULT_TZ)
-        set_user_timezone(session, update.effective_user.id, tzid)
-        session.commit()
-    await update.message.reply_text(f"Часовой пояс обновлён: {tzid}")
+    if update.effective_user:
+        with get_session() as session:
+            get_or_create_user(session, update.effective_user.id, DEFAULT_TZ)
+            set_user_timezone(session, update.effective_user.id, choice)
+            session.commit()
+    if query.message:
+        await query.message.reply_text(f"Часовой пояс обновлён: {choice}")
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -217,7 +266,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text("Сначала отправьте /start")
         return
     if user.calorie_target is None:
-        await update.message.reply_text("Укажите дневной лимит через /setcalories <ккал>.")
+        await update.message.reply_text("Укажите дневной лимит через /target.")
         return
     remaining = max(user.calorie_target - totals["cal_today"], 0)
     await update.message.reply_text(
@@ -237,7 +286,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             user = get_or_create_user(session, update.effective_user.id, DEFAULT_TZ)
             totals = {"cal_today": 0}
         if user.calorie_target is None:
-            await update.message.reply_text("Сначала установите дневной лимит: /setcalories <ккал>.")
+            await update.message.reply_text("Сначала установите дневной лимит: /target.")
             return
     # Download the highest resolution photo
     try:
@@ -325,10 +374,16 @@ def main() -> None:
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CallbackQueryHandler(handle_goal_choice, pattern=r"^goal:(lose|maintain|gain)$"))
     application.add_handler(CallbackQueryHandler(handle_confirm, pattern=r"^confirm:(yes|edit)$"))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_manual_calories))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_manual_input))
 
-    application.add_handler(CommandHandler("setcalories", cmd_setcalories))
-    application.add_handler(CommandHandler("settz", cmd_settz))
+    # target calories (new) and legacy alias
+    application.add_handler(CommandHandler("target", cmd_target))
+    application.add_handler(CommandHandler("setcalories", cmd_target))
+
+    # timezone selection
+    application.add_handler(CommandHandler("timezone", cmd_timezone))
+    application.add_handler(CallbackQueryHandler(handle_tz_choice, pattern=r"^tz:.*$"))
+
     application.add_handler(CommandHandler("status", cmd_status))
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
