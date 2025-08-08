@@ -2,12 +2,13 @@ import asyncio
 import base64
 import logging
 import os
+import random
 from datetime import datetime, timezone, timedelta, date
 from zoneinfo import ZoneInfo
 import re
 
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, CallbackQueryHandler, filters
 
@@ -23,6 +24,39 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 DEFAULT_TZ = os.getenv("DEFAULT_TIMEZONE", "Europe/Moscow")
+
+# Варианты сообщений о загрузке
+LOADING_MESSAGES = [
+    "🤔 Анализирую...",
+    "🔍 Изучаю блюдо...",
+    "⚡ Обрабатываю данные...",
+    "🧠 Думаю...",
+    "📊 Считаю калории...",
+    "🔄 Анализирую питательность...",
+    "⏳ Секундочку...",
+    "🎯 Определяю состав...",
+]
+
+async def send_loading_message(update: Update) -> Message | None:
+    """Отправляет случайное сообщение о загрузке"""
+    if not update.message:
+        return None
+    
+    try:
+        loading_text = random.choice(LOADING_MESSAGES)
+        loading_message = await update.message.reply_text(loading_text)
+        return loading_message
+    except Exception as e:
+        logger.exception("Failed to send loading message: %s", e)
+        return None
+
+async def delete_loading_message(loading_message: Message | None) -> None:
+    """Удаляет временное сообщение о загрузке"""
+    if loading_message:
+        try:
+            await loading_message.delete()
+        except Exception as e:
+            logger.exception("Failed to delete loading message: %s", e)
 
 GOAL_TO_PROPOSAL = {
     "lose": {
@@ -171,7 +205,11 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 session.commit()
             msg = (
                 f"✅ Готово! Твой дневной лимит: {proposed} ккал\n"
-                "Теперь просто присылай мне фото еды — я скажу, что в тарелке, оценю калорийность и подскажу, сколько осталось до конца дня 💪"
+                "Теперь присылай мне:\n"
+                "📸 Фото еды — я распознаю блюдо и оценю калорийность\n"
+                "✍️ Текстовое описание — например, \"паста карбонара\" или \"200г риса\"\n"
+                "📸+✍️ Фото с подписью — для более точного анализа\n\n"
+                "Я подскажу, сколько калорий осталось до конца дня 💪"
             )
             if query.message:
                 await query.message.reply_text(msg)
@@ -219,7 +257,11 @@ async def handle_manual_input(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         await update.message.reply_text(
             f"✅ Готово! Твой дневной лимит: {target} ккал\n"
-            "Теперь просто присылай мне фото еды — я скажу, что в тарелке, оценю калорийность и подскажу, сколько осталось до конца дня 💪"
+            "Теперь присылай мне:\n"
+            "📸 Фото еды — я распознаю блюдо и оценю калорийность\n"
+            "✍️ Текстовое описание — например, \"паста карбонара\" или \"200г риса\"\n"
+            "📸+✍️ Фото с подписью — для более точного анализа\n\n"
+            "Я подскажу, сколько калорий осталось до конца дня 💪"
         )
         return
 
@@ -239,7 +281,16 @@ async def handle_manual_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(f"Часовой пояс обновлён: {text}")
         return
 
-    # If none of the above matched and it's plain text, ignore silently
+    # If none of the above matched, try to analyze as food description
+    # Only process as food if user has calorie target set
+    with get_session() as session:
+        user, totals = get_today_totals(session, update.effective_user.id)
+        if user is not None and user.calorie_target is not None:
+            # This looks like a food description, process it
+            await _analyze_text_as_food(update, text)
+            return
+    
+    # If no calorie target set, ignore silently
     return
 
 
@@ -351,35 +402,98 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     assert update.message is not None
     assert update.effective_user is not None
-    with get_session() as session:
-        user, totals = get_today_totals(session, update.effective_user.id)
-        if user is None:
-            user = get_or_create_user(session, update.effective_user.id, DEFAULT_TZ)
-            totals = {"cal_today": 0}
-        if user.calorie_target is None:
-            await update.message.reply_text("Сначала установите дневной лимит: /target.")
+    
+    # Отправляем сообщение о загрузке
+    loading_message = await send_loading_message(update)
+    
+    try:
+        with get_session() as session:
+            user, totals = get_today_totals(session, update.effective_user.id)
+            if user is None:
+                user = get_or_create_user(session, update.effective_user.id, DEFAULT_TZ)
+                totals = {"cal_today": 0}
+            if user.calorie_target is None:
+                await delete_loading_message(loading_message)
+                await update.message.reply_text("Сначала установите дневной лимит: /target.")
+                return
+        
+        # Получаем текст подписи к фото (если есть)
+        photo_caption = (update.message.caption or "").strip()
+        
+        # Download the highest resolution photo
+        try:
+            photo = update.message.photo[-1]
+            file = await photo.get_file()
+            buf = await file.download_as_bytearray()
+            image_b64 = base64.b64encode(bytes(buf)).decode("utf-8")
+            image_data_url = f"data:image/jpeg;base64,{image_b64}"
+        except Exception as e:
+            logger.exception("Failed to download photo: %s", e)
+            await delete_loading_message(loading_message)
+            await update.message.reply_text("Не удалось скачать фото. Попробуйте ещё раз.")
             return
-    # Download the highest resolution photo
-    try:
-        photo = update.message.photo[-1]
-        file = await photo.get_file()
-        buf = await file.download_as_bytearray()
-        image_b64 = base64.b64encode(bytes(buf)).decode("utf-8")
-        image_data_url = f"data:image/jpeg;base64,{image_b64}"
-    except Exception as e:
-        logger.exception("Failed to download photo: %s", e)
-        await update.message.reply_text("Не удалось скачать фото. Попробуйте ещё раз.")
-        return
 
-    # Call vision provider
+        # Call vision provider with photo and optional text description
+        try:
+            system_prompt = build_system_prompt()
+            analysis = await analyze_meal(
+                image_data_url=image_data_url, 
+                system_prompt=system_prompt,
+                text_description=photo_caption if photo_caption else None
+            )
+        except Exception as e:
+            logger.exception("Vision analyze error: %s", e)
+            await delete_loading_message(loading_message)
+            await update.message.reply_text("Не удалось проанализировать фото. Попробуйте ещё раз.")
+            return
+
+        # Удаляем сообщение о загрузке перед отправкой результата
+        await delete_loading_message(loading_message)
+        
+        # Extract values and process the result (same as before)
+        await _process_food_analysis(update, analysis)
+        
+    except Exception as e:
+        # В случае любой ошибки удаляем сообщение о загрузке
+        await delete_loading_message(loading_message)
+        logger.exception("Unexpected error in handle_photo: %s", e)
+        await update.message.reply_text("Произошла ошибка при обработке фото. Попробуйте ещё раз.")
+
+
+async def _analyze_text_as_food(update: Update, text_description: str) -> None:
+    """Анализирует текстовое описание как еду"""
+    assert update.message is not None
+    assert update.effective_user is not None
+    
+    # Отправляем сообщение о загрузке
+    loading_message = await send_loading_message(update)
+    
     try:
+        # Call vision provider with text description only
         system_prompt = build_system_prompt()
-        analysis = await analyze_meal(image_data_url, system_prompt)
+        analysis = await analyze_meal(
+            system_prompt=system_prompt,
+            text_description=text_description
+        )
+        
+        # Удаляем сообщение о загрузке перед отправкой результата
+        await delete_loading_message(loading_message)
+        
+        # Process the result
+        await _process_food_analysis(update, analysis)
+        
     except Exception as e:
-        logger.exception("Vision analyze error: %s", e)
-        await update.message.reply_text("Не удалось проанализировать фото. Попробуйте ещё раз.")
-        return
+        # В случае ошибки удаляем сообщение о загрузке
+        await delete_loading_message(loading_message)
+        logger.exception("Text analyze error: %s", e)
+        await update.message.reply_text("Не удалось проанализировать описание. Попробуйте ещё раз.")
 
+
+async def _process_food_analysis(update: Update, analysis: dict) -> None:
+    """Общая логика обработки результата анализа еды"""
+    assert update.message is not None
+    assert update.effective_user is not None
+    
     # Extract values
     dish = analysis.get("dish") or "Блюдо"
     portion = analysis.get("portion") or "—"
@@ -393,7 +507,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         user, totals = get_today_totals(session, update.effective_user.id)
         if low_quality:
             reply_text = (
-                "Сложно распознать изображение. Пожалуйста, сделайте фото при лучшем освещении и повторите."
+                "Сложно распознать или проанализировать. Пожалуйста, добавьте более подробное описание или сделайте фото при лучшем освещении."
             )
             await update.message.reply_text(reply_text)
             return

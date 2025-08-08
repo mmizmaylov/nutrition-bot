@@ -1,5 +1,5 @@
 import os
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from openai import AsyncOpenAI
 
@@ -28,37 +28,85 @@ def _strip_code_fences(text: str) -> str:
     return t
 
 
-async def analyze_meal(image_data_url: str, system_prompt: str) -> Dict[str, Any]:
+async def analyze_meal(
+    image_data_url: Optional[str] = None, 
+    system_prompt: str = "", 
+    text_description: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Анализирует еду по фото, текстовому описанию или их комбинации.
+    
+    Args:
+        image_data_url: Base64 изображение в формате data:image/jpeg;base64,... (опционально)
+        system_prompt: Системный промпт
+        text_description: Текстовое описание еды (опционально)
+    
+    Returns:
+        Словарь с анализом еды
+    """
     model = os.getenv("OPENAI_VISION_MODEL", "gpt-4o-mini")
     client = _get_client()
 
-    user_instruction = (
-        "Проанализируй изображение с едой и верни краткую оценку. Ответ строго в формате JSON с ключами: "
-        "dish (строка), portion (строка), calories_kcal (число), health_score (1..5, число или строка), "
-        "recommendation (строка), motivation (строка), low_quality (boolean). Без комментариев."
-    )
+    # Формируем инструкцию в зависимости от входных данных
+    if image_data_url and text_description:
+        user_instruction = (
+            f"Проанализируй изображение с едой и дополнительное описание: '{text_description}'. "
+            "Учти оба источника информации при анализе. "
+            "Верни краткую оценку в формате JSON с ключами: "
+            "dish (строка), portion (строка), calories_kcal (число), health_score (1..5, число или строка), "
+            "recommendation (строка), motivation (строка), low_quality (boolean). Без комментариев."
+        )
+        content = [
+            {"type": "text", "text": user_instruction},
+            {"type": "image_url", "image_url": {"url": image_data_url, "detail": "auto"}},
+        ]
+    elif image_data_url:
+        user_instruction = (
+            "Проанализируй изображение с едой и верни краткую оценку. Ответ строго в формате JSON с ключами: "
+            "dish (строка), portion (строка), calories_kcal (число), health_score (1..5, число или строка), "
+            "recommendation (строка), motivation (строка), low_quality (boolean). Без комментариев."
+        )
+        content = [
+            {"type": "text", "text": user_instruction},
+            {"type": "image_url", "image_url": {"url": image_data_url, "detail": "auto"}},
+        ]
+    elif text_description:
+        user_instruction = (
+            f"Проанализируй описание еды: '{text_description}'. "
+            "Оцени блюдо, примерный размер порции и калорийность на основе описания. "
+            "Верни краткую оценку в формате JSON с ключами: "
+            "dish (строка), portion (строка), calories_kcal (число), health_score (1..5, число или строка), "
+            "recommendation (строка), motivation (строка), low_quality (boolean). "
+            "Поскольку это текстовое описание, установи low_quality=false. Без комментариев."
+        )
+        content = [{"type": "text", "text": user_instruction}]
+    else:
+        # Если ничего не передано, возвращаем заглушку
+        return {
+            "dish": "Неизвестное блюдо",
+            "portion": "—",
+            "calories_kcal": None,
+            "health_score": None,
+            "recommendation": "Добавьте описание или фото еды",
+            "motivation": "Попробуйте еще раз!",
+            "low_quality": True,
+        }
 
     resp = await client.chat.completions.create(
         model=model,
         messages=[
             {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": user_instruction},
-                    {"type": "image_url", "image_url": {"url": image_data_url, "detail": "auto"}},
-                ],
-            },
+            {"role": "user", "content": content},
         ],
         temperature=0.2,
         max_tokens=400,
     )
 
-    content = resp.choices[0].message.content or "{}"
-    content = _strip_code_fences(content)
+    content_text = resp.choices[0].message.content or "{}"
+    content_text = _strip_code_fences(content_text)
     try:
         import json
-        data = json.loads(content)
+        data = json.loads(content_text)
         if not isinstance(data, dict):
             raise ValueError
         return data
