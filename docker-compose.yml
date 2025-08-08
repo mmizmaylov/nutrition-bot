@@ -4,4 +4,6 @@ services:
     container_name: nutrition-bot
     env_file:
       - .env
+    volumes:
+      - /opt/nutrition-bot/nutrition.db:/app/nutrition.db
     restart: unless-stopped 
