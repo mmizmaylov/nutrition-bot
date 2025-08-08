@@ -2,7 +2,7 @@ import asyncio
 import base64
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta, date
 from zoneinfo import ZoneInfo
 import re
 
@@ -13,9 +13,10 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 
 from app.db import get_session, init_db, get_or_create_user, set_user_calorie_target, set_user_timezone, get_today_totals
 from app.db import add_meal
+from app.db import get_all_users, get_meals_for_local_day, get_day_total_calories, has_summary_sent, mark_summary_sent
 from app.vision_providers.openai_provider import analyze_meal
 from app.prompt import build_system_prompt
-from app.formatting import format_reply
+from app.formatting import format_reply, format_daily_summary
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -90,6 +91,44 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Сначала выбери свою цель:"
     )
     await update.message.reply_text(greeting, reply_markup=goals_keyboard())
+
+
+# Daily summary scheduler
+async def daily_summary_worker(app: Application) -> None:
+    while True:
+        try:
+            utc_now = datetime.now(timezone.utc)
+            with get_session() as session:
+                users = get_all_users(session)
+                for user in users:
+                    tz = ZoneInfo(user.timezone)
+                    local_now = utc_now.astimezone(tz)
+                    # Consider midnight window: 00:00:00 .. 00:10:00 local time
+                    if not (local_now.hour == 0 and local_now.minute < 10):
+                        continue
+
+                    day_yesterday = (local_now.date() - timedelta(days=1))
+                    day_str = day_yesterday.isoformat()
+
+                    # Avoid duplicates
+                    if has_summary_sent(session, user.telegram_id, day_str):
+                        continue
+
+                    meals = get_meals_for_local_day(session, user.telegram_id, day_yesterday, user.timezone)
+                    items = [(m.dish, m.portion, m.calories) for m in meals]
+                    total = get_day_total_calories(session, user.telegram_id, day_yesterday, user.timezone)
+                    text = format_daily_summary(date_str=day_str, items=items, total_calories=total, target=user.calorie_target)
+
+                    try:
+                        await app.bot.send_message(chat_id=user.telegram_id, text=text)
+                        mark_summary_sent(session, user.telegram_id, day_str)
+                        session.commit()
+                    except Exception:
+                        logger.exception("Failed to send daily summary to %s", user.telegram_id)
+        except Exception:
+            logger.exception("daily_summary_worker iteration error")
+
+        await asyncio.sleep(300)  # 5 minutes
 
 
 async def handle_goal_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -395,6 +434,42 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(reply, parse_mode=ParseMode.MARKDOWN)
 
 
+async def cmd_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    assert update.message is not None
+    assert update.effective_user is not None
+    user_id = update.effective_user.id
+
+    with get_session() as session:
+        user = get_or_create_user(session, user_id, DEFAULT_TZ)
+
+    tz = ZoneInfo(user.timezone)
+    now_local = datetime.now(tz)
+
+    # parse optional arg: yesterday | YYYY-MM-DD
+    day: date
+    if context.args:
+        arg = context.args[0].strip().lower()
+        if arg == "yesterday":
+            day = now_local.date() - timedelta(days=1)
+        else:
+            try:
+                year, month, day_ = map(int, arg.split("-"))
+                day = date(year, month, day_)
+            except Exception:
+                await update.message.reply_text("Неверный формат. Используй: /summary, /summary yesterday или /summary YYYY-MM-DD")
+                return
+    else:
+        day = now_local.date()
+
+    with get_session() as session:
+        meals = get_meals_for_local_day(session, user_id, day, user.timezone)
+        items = [(m.dish, m.portion, m.calories) for m in meals]
+        total = get_day_total_calories(session, user_id, day, user.timezone)
+        text = format_daily_summary(day.isoformat(), items, total, user.calorie_target)
+
+    await update.message.reply_text(text)
+
+
 def main() -> None:
     init_db()
     token = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -418,6 +493,11 @@ def main() -> None:
 
     application.add_handler(CommandHandler("status", cmd_status))
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+
+    application.add_handler(CommandHandler("summary", cmd_summary))
+
+    # Start the daily summary worker
+    asyncio.get_event_loop().create_task(daily_summary_worker(application))
 
     application.run_polling()
 

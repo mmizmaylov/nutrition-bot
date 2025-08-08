@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, date
 from typing import Any, Dict, Optional, Tuple
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, create_engine, func, select
+from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, create_engine, func, select, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
 ENGINE = create_engine("sqlite:///nutrition.db", echo=False, future=True)
@@ -39,6 +39,19 @@ class Meal(Base):
     raw_model_json: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
     user: Mapped[User] = relationship("User", back_populates="meals")
+
+
+class DailySummary(Base):
+    __tablename__ = "daily_summaries"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.telegram_id"), nullable=False, index=True)
+    # День в локальной зоне пользователя в формате YYYY-MM-DD
+    day_local: Mapped[str] = mapped_column(String(10), nullable=False)
+    sent_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "day_local", name="uq_daily_summary_user_day"),
+    )
 
 
 @contextmanager
@@ -127,4 +140,59 @@ def add_meal(
         raw_model_json=raw_json_str,
     )
     session.add(meal)
-    return meal 
+    return meal
+
+
+# New helpers for daily summaries
+
+def get_all_users(session: Session) -> list[User]:
+    q = select(User).order_by(User.telegram_id.asc())
+    return list(session.execute(q).scalars().all())
+
+
+def get_meals_for_local_day(session: Session, telegram_id: int, day: date, tzid: str) -> list[Meal]:
+    tz = ZoneInfo(tzid)
+    start_local = datetime(day.year, day.month, day.day, 0, 0, 0, tzinfo=tz)
+    end_local = start_local.replace(hour=23, minute=59, second=59, microsecond=999999)
+
+    start_utc = start_local.astimezone(ZoneInfo("UTC"))
+    end_utc = end_local.astimezone(ZoneInfo("UTC"))
+
+    q = (
+        select(Meal)
+        .where(Meal.user_id == telegram_id)
+        .where(Meal.created_at_utc >= start_utc)
+        .where(Meal.created_at_utc <= end_utc)
+        .order_by(Meal.created_at_utc.asc())
+    )
+    return list(session.execute(q).scalars().all())
+
+
+def get_day_total_calories(session: Session, telegram_id: int, day: date, tzid: str) -> int:
+    tz = ZoneInfo(tzid)
+    start_local = datetime(day.year, day.month, day.day, 0, 0, 0, tzinfo=tz)
+    end_local = start_local.replace(hour=23, minute=59, second=59, microsecond=999999)
+    start_utc = start_local.astimezone(ZoneInfo("UTC"))
+    end_utc = end_local.astimezone(ZoneInfo("UTC"))
+    q = (
+        select(func.coalesce(func.sum(Meal.calories), 0))
+        .where(Meal.user_id == telegram_id)
+        .where(Meal.created_at_utc >= start_utc)
+        .where(Meal.created_at_utc <= end_utc)
+    )
+    total = session.execute(q).scalar_one()
+    return int(total or 0)
+
+
+def has_summary_sent(session: Session, telegram_id: int, day_local_str: str) -> bool:
+    q = (
+        select(func.count(DailySummary.id))
+        .where(DailySummary.user_id == telegram_id)
+        .where(DailySummary.day_local == day_local_str)
+    )
+    return (session.execute(q).scalar_one() or 0) > 0
+
+
+def mark_summary_sent(session: Session, telegram_id: int, day_local_str: str) -> None:
+    rec = DailySummary(user_id=telegram_id, day_local=day_local_str, sent_at_utc=datetime.now(ZoneInfo("UTC")))
+    session.add(rec) 
