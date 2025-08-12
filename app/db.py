@@ -36,6 +36,11 @@ class Meal(Base):
     portion: Mapped[str] = mapped_column(String(256), nullable=True)
     calories: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
+    # Macros in grams (approximate)
+    protein_g: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    fat_g: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    carbs_g: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
     raw_model_json: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
     user: Mapped[User] = relationship("User", back_populates="meals")
@@ -65,6 +70,23 @@ def get_session() -> Session:
 
 def init_db() -> None:
     Base.metadata.create_all(ENGINE)
+    # Lightweight migration for new macro columns if DB already exists
+    try:
+        with ENGINE.connect() as conn:
+            info = conn.exec_driver_sql("PRAGMA table_info('meals')").fetchall()
+            existing_cols = {row[1] for row in info}
+            alter_statements: list[str] = []
+            if "protein_g" not in existing_cols:
+                alter_statements.append("ALTER TABLE meals ADD COLUMN protein_g INTEGER")
+            if "fat_g" not in existing_cols:
+                alter_statements.append("ALTER TABLE meals ADD COLUMN fat_g INTEGER")
+            if "carbs_g" not in existing_cols:
+                alter_statements.append("ALTER TABLE meals ADD COLUMN carbs_g INTEGER")
+            for stmt in alter_statements:
+                conn.exec_driver_sql(stmt)
+    except Exception:
+        # Best-effort migration; ignore if not applicable (e.g., non-SQLite)
+        pass
 
 
 def get_or_create_user(session: Session, telegram_id: int, default_tz: str) -> User:
@@ -120,6 +142,9 @@ def add_meal(
     dish: str,
     portion: Optional[str],
     calories: Optional[int],
+    protein_g: Optional[int] = None,
+    fat_g: Optional[int] = None,
+    carbs_g: Optional[int] = None,
     raw_model_json: Optional[dict[str, Any]] = None,
 ) -> Meal:
     raw_json_str = None
@@ -137,6 +162,9 @@ def add_meal(
         dish=dish,
         portion=portion or "",
         calories=calories,
+        protein_g=protein_g,
+        fat_g=fat_g,
+        carbs_g=carbs_g,
         raw_model_json=raw_json_str,
     )
     session.add(meal)
@@ -195,4 +223,18 @@ def has_summary_sent(session: Session, telegram_id: int, day_local_str: str) -> 
 
 def mark_summary_sent(session: Session, telegram_id: int, day_local_str: str) -> None:
     rec = DailySummary(user_id=telegram_id, day_local=day_local_str, sent_at_utc=datetime.now(ZoneInfo("UTC")))
-    session.add(rec) 
+    session.add(rec)
+
+
+# Edit/cancel helpers
+def get_meal_by_id(session: Session, meal_id: int, user_id: int) -> Optional[Meal]:
+    q = select(Meal).where(Meal.id == meal_id).where(Meal.user_id == user_id)
+    return session.execute(q).scalars().first()
+
+
+def delete_meal_by_id(session: Session, meal_id: int, user_id: int) -> bool:
+    meal = get_meal_by_id(session, meal_id, user_id)
+    if meal is None:
+        return False
+    session.delete(meal)
+    return True 

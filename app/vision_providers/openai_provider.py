@@ -53,8 +53,8 @@ async def analyze_meal(
             f"Проанализируй изображение с едой и дополнительное описание: '{text_description}'. "
             "Учти оба источника информации при анализе. "
             "Верни краткую оценку в формате JSON с ключами: "
-            "dish (строка), portion (строка), calories_kcal (число), health_score (1..5, число или строка), "
-            "recommendation (строка), motivation (строка), low_quality (boolean). Без комментариев."
+            "dish (строка), portion (строка), calories_kcal (число), protein_g (число, г), fat_g (число, г), carbs_g (число, г), "
+            "health_score (1..5, число или строка), recommendation (строка), motivation (строка), low_quality (boolean). Без комментариев."
         )
         content = [
             {"type": "text", "text": user_instruction},
@@ -63,8 +63,8 @@ async def analyze_meal(
     elif image_data_url:
         user_instruction = (
             "Проанализируй изображение с едой и верни краткую оценку. Ответ строго в формате JSON с ключами: "
-            "dish (строка), portion (строка), calories_kcal (число), health_score (1..5, число или строка), "
-            "recommendation (строка), motivation (строка), low_quality (boolean). Без комментариев."
+            "dish (строка), portion (строка), calories_kcal (число), protein_g (число, г), fat_g (число, г), carbs_g (число, г), "
+            "health_score (1..5, число или строка), recommendation (строка), motivation (строка), low_quality (boolean). Без комментариев."
         )
         content = [
             {"type": "text", "text": user_instruction},
@@ -75,8 +75,8 @@ async def analyze_meal(
             f"Проанализируй описание еды: '{text_description}'. "
             "Оцени блюдо, примерный размер порции и калорийность на основе описания. "
             "Верни краткую оценку в формате JSON с ключами: "
-            "dish (строка), portion (строка), calories_kcal (число), health_score (1..5, число или строка), "
-            "recommendation (строка), motivation (строка), low_quality (boolean). "
+            "dish (строка), portion (строка), calories_kcal (число), protein_g (число, г), fat_g (число, г), carbs_g (число, г), "
+            "health_score (1..5, число или строка), recommendation (строка), motivation (строка), low_quality (boolean). "
             "Поскольку это текстовое описание, установи low_quality=false. Без комментариев."
         )
         content = [{"type": "text", "text": user_instruction}]
@@ -86,6 +86,9 @@ async def analyze_meal(
             "dish": "Неизвестное блюдо",
             "portion": "—",
             "calories_kcal": None,
+            "protein_g": None,
+            "fat_g": None,
+            "carbs_g": None,
             "health_score": None,
             "recommendation": "Добавьте описание или фото еды",
             "motivation": "Попробуйте еще раз!",
@@ -115,6 +118,9 @@ async def analyze_meal(
             "dish": "Блюдо",
             "portion": "—",
             "calories_kcal": None,
+            "protein_g": None,
+            "fat_g": None,
+            "carbs_g": None,
             "health_score": None,
             "recommendation": "—",
             "motivation": "Молодец!",
