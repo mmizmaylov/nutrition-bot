@@ -614,7 +614,12 @@ async def cmd_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         items = [(m.dish, m.portion, m.calories, m.protein_g, m.fat_g, m.carbs_g) for m in meals]
         total = get_day_total_calories(session, user_id, day, user.timezone)
         if not items:
-            text = format_empty_day_reminder(day.isoformat())
+            # If querying today, just say there are no records yet; no reminder
+            if day == now_local.date():
+                text = "За сегодня пока нет записей."
+            else:
+                # Show regular summary with 'не зафиксировано'
+                text = format_daily_summary(day.isoformat(), items, total, (0, 0, 0), user.calorie_target)
         else:
             # Aggregate macros
             total_protein = sum(int(m.protein_g) for m in meals if isinstance(m.protein_g, int))
@@ -638,6 +643,8 @@ def _build_today_meals_keyboard(user_id: int, tzid: str) -> InlineKeyboardMarkup
     for m in meals:
         label = format_meal_button_label(m.dish, m.portion, m.calories)
         buttons.append([InlineKeyboardButton(text=label, callback_data=f"meal:{m.id}")])
+    # Add cancel button at the bottom
+    buttons.append([InlineKeyboardButton(text="Отмена", callback_data="abort")])
     return InlineKeyboardMarkup(buttons)
 
 
@@ -716,6 +723,18 @@ async def handle_edit_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
     context.user_data["awaiting_edit_input"] = True
     if query.message:
         await query.message.reply_text("Отправьте уточнение текстом или новое фото для переоценки блюда.")
+
+
+async def handle_abort(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    # Clear any edit-related state
+    context.user_data["editing_meal_id"] = None
+    context.user_data["awaiting_edit_input"] = False
+    if query.message:
+        await query.message.reply_text("Действие отменено.")
 
 
 async def _apply_edit_to_meal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -841,6 +860,7 @@ def main() -> None:
     application.add_handler(CommandHandler("edit", cmd_edit))
     application.add_handler(CallbackQueryHandler(handle_cancel_choice, pattern=r"^meal:\d+$"))
     application.add_handler(CallbackQueryHandler(handle_edit_choice, pattern=r"^meal:\d+$"))
+    application.add_handler(CallbackQueryHandler(handle_abort, pattern=r"^abort$"))
     # After selecting a meal to edit, the next text/photo is routed here
     application.add_handler(MessageHandler((filters.TEXT | filters.PHOTO) & ~filters.COMMAND, handle_edit_input))
 

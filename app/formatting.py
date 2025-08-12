@@ -31,11 +31,11 @@ def format_reply(
     macros_line = None
     macros_parts: list[str] = []
     if protein_g is not None:
-        macros_parts.append(f"белки: {protein_g} г")
+        macros_parts.append(f"Белки: {protein_g} г")
     if fat_g is not None:
-        macros_parts.append(f"жиры: {fat_g} г")
+        macros_parts.append(f"Жиры: {fat_g} г")
     if carbs_g is not None:
-        macros_parts.append(f"углеводы: {carbs_g} г")
+        macros_parts.append(f"Углеводы: {carbs_g} г")
     if macros_parts:
         macros_line = " | ".join(macros_parts)
 
@@ -46,7 +46,7 @@ def format_reply(
         f"🔥 Калорийность: {cal_str}",
     ]
     if macros_line:
-        lines.append(f"📊 КБЖУ: {macros_line}")
+        lines.append(f"📊 {macros_line}")
     lines += [
         "",
         f"Оценка пользы: {stars}",
@@ -127,9 +127,7 @@ def format_empty_day_reminder(date_str: str) -> str:
 
 
 def format_meal_button_label(dish: str, portion: Optional[str], calories: Optional[int]) -> str:
-    p = f" · {portion}" if portion else ""
-    c = f" — {calories} ккал" if calories is not None else ""
-    return f"{dish}{p}{c}"
+    return (dish or "").strip()
 
 
 def format_deleted_confirmation() -> str:
