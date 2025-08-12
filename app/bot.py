@@ -823,12 +823,45 @@ async def _apply_edit_to_meal(update: Update, context: ContextTypes.DEFAULT_TYPE
         except Exception:
             pass
         session.commit()
+
+        # Recompute today's totals and fetch user to calculate remaining
+        user, totals = get_today_totals(session, update.effective_user.id)
+        remaining = None
+        if user and user.calorie_target is not None and totals is not None:
+            remaining = max(user.calorie_target - totals.get("cal_today", 0), 0)
+
+        # Use updated fields from DB to render reply
+        final_dish = meal.dish
+        final_portion = meal.portion
+        final_cal = meal.calories
+        final_p = meal.protein_g
+        final_f = meal.fat_g
+        final_c = meal.carbs_g
+
     # Clear edit state
     context.user_data["editing_meal_id"] = None
     context.user_data["awaiting_edit_input"] = False
 
+    # Build a formatted reply mirroring standard analysis output
+    health_score = new_analysis.get("health_score")
+    recommendation = new_analysis.get("recommendation") or "—"
+    motivation = new_analysis.get("motivation") or "Отличная работа!"
+
+    reply = format_reply(
+        dish=final_dish or "Блюдо",
+        portion=final_portion or "—",
+        calories=int(final_cal) if isinstance(final_cal, int) else None,
+        protein_g=int(final_p) if isinstance(final_p, int) else None,
+        fat_g=int(final_f) if isinstance(final_f, int) else None,
+        carbs_g=int(final_c) if isinstance(final_c, int) else None,
+        health_score=health_score,
+        recommendation=recommendation,
+        remaining=remaining,
+        motivation=motivation,
+    )
+
     if update.message:
-        await update.message.reply_text(format_updated_confirmation())
+        await update.message.reply_text(reply, parse_mode=ParseMode.MARKDOWN)
 
 
 async def handle_edit_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
