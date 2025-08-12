@@ -241,6 +241,10 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def handle_manual_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.effective_user:
         return
+    # Intercept if we're in edit mode: treat this text as an edit clarification
+    if context.user_data.get("awaiting_edit_input"):
+        await _apply_edit_to_meal(update, context)
+        return
     text = (update.message.text or "").strip()
 
     # Manual calories entry (onboarding or /target)
@@ -418,6 +422,10 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     assert update.message is not None
     assert update.effective_user is not None
+    # If we're editing, use this photo to re-analyze the selected meal
+    if context.user_data.get("awaiting_edit_input"):
+        await _apply_edit_to_meal(update, context)
+        return
     
     # Отправляем сообщение о загрузке
     loading_message = await send_loading_message(update)
@@ -630,7 +638,7 @@ async def cmd_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.reply_text(text)
 
 
-def _build_today_meals_keyboard(user_id: int, tzid: str) -> InlineKeyboardMarkup | None:
+def _build_today_meals_keyboard(user_id: int, tzid: str, action: str) -> InlineKeyboardMarkup | None:
     from app.db import get_meals_for_local_day
     from datetime import datetime
     tz = ZoneInfo(tzid)
@@ -642,7 +650,7 @@ def _build_today_meals_keyboard(user_id: int, tzid: str) -> InlineKeyboardMarkup
     buttons = []
     for m in meals:
         label = format_meal_button_label(m.dish, m.portion, m.calories)
-        buttons.append([InlineKeyboardButton(text=label, callback_data=f"meal:{m.id}")])
+        buttons.append([InlineKeyboardButton(text=label, callback_data=f"{action}:meal:{m.id}")])
     # Add cancel button at the bottom
     buttons.append([InlineKeyboardButton(text="Отмена", callback_data="abort")])
     return InlineKeyboardMarkup(buttons)
@@ -656,7 +664,7 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if user is None:
         await update.message.reply_text("Сначала отправьте /start")
         return
-    kb = _build_today_meals_keyboard(user.telegram_id, user.timezone)
+    kb = _build_today_meals_keyboard(user.telegram_id, user.timezone, action="cancel")
     if kb is None:
         await update.message.reply_text("За сегодня пока нет записей.")
         return
@@ -669,9 +677,12 @@ async def handle_cancel_choice(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     await query.answer()
     data = query.data or ""
-    if not data.startswith("meal:"):
+    if not data.startswith("cancel:meal:"):
         return
-    meal_id_str = data.split(":", 1)[1]
+    parts = data.split(":", 2)
+    if len(parts) != 3:
+        return
+    meal_id_str = parts[2]
     try:
         meal_id = int(meal_id_str)
     except Exception:
@@ -695,7 +706,7 @@ async def cmd_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if user is None:
         await update.message.reply_text("Сначала отправьте /start")
         return
-    kb = _build_today_meals_keyboard(user.telegram_id, user.timezone)
+    kb = _build_today_meals_keyboard(user.telegram_id, user.timezone, action="edit")
     if kb is None:
         await update.message.reply_text("За сегодня пока нет записей.")
         return
@@ -708,9 +719,12 @@ async def handle_edit_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     await query.answer()
     data = query.data or ""
-    if not data.startswith("meal:"):
+    if not data.startswith("edit:meal:"):
         return
-    meal_id_str = data.split(":", 1)[1]
+    parts = data.split(":", 2)
+    if len(parts) != 3:
+        return
+    meal_id_str = parts[2]
     try:
         meal_id = int(meal_id_str)
     except Exception:
@@ -858,11 +872,10 @@ def main() -> None:
     # cancel/edit flows
     application.add_handler(CommandHandler("cancel", cmd_cancel))
     application.add_handler(CommandHandler("edit", cmd_edit))
-    application.add_handler(CallbackQueryHandler(handle_cancel_choice, pattern=r"^meal:\d+$"))
-    application.add_handler(CallbackQueryHandler(handle_edit_choice, pattern=r"^meal:\d+$"))
+    application.add_handler(CallbackQueryHandler(handle_cancel_choice, pattern=r"^cancel:meal:\d+$"))
+    application.add_handler(CallbackQueryHandler(handle_edit_choice, pattern=r"^edit:meal:\d+$"))
     application.add_handler(CallbackQueryHandler(handle_abort, pattern=r"^abort$"))
-    # After selecting a meal to edit, the next text/photo is routed here
-    application.add_handler(MessageHandler((filters.TEXT | filters.PHOTO) & ~filters.COMMAND, handle_edit_input))
+    # Edit input is intercepted in handle_manual_input/handle_photo when awaiting edit
 
     # Start the daily summary worker
     asyncio.get_event_loop().create_task(daily_summary_worker(application))
