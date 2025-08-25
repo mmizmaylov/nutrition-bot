@@ -4,6 +4,7 @@ import logging
 import os
 import random
 from datetime import datetime, timezone, timedelta, date
+from typing import Optional
 from zoneinfo import ZoneInfo
 import re
 
@@ -561,6 +562,7 @@ async def _process_food_analysis(update: Update, context: ContextTypes.DEFAULT_T
         # Determine target date and time
         target_datetime_utc = datetime.now(timezone.utc)
         is_previous_day = False
+        date_str = None
         
         # Check if we're adding for a previous day
         if context.user_data.get("awaiting_previous_day_input"):
