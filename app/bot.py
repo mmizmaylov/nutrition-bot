@@ -25,6 +25,7 @@ from app.formatting import (
     format_meal_button_label,
     format_deleted_confirmation,
     format_updated_confirmation,
+    format_add_previous_day_button,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -156,21 +157,23 @@ async def daily_summary_worker(app: Application) -> None:
                     if has_summary_sent(session, user.telegram_id, day_str):
                         continue
 
-                    meals = get_meals_for_local_day(session, user.telegram_id, day_yesterday, user.timezone)
-                    items = [(m.dish, m.portion, m.calories, m.protein_g, m.fat_g, m.carbs_g) for m in meals]
-                    total = get_day_total_calories(session, user.telegram_id, day_yesterday, user.timezone)
-
+                    # Use shared function to build summary text
+                    text = _build_daily_summary_text(user.telegram_id, day_yesterday, day_str, user.timezone, user.calorie_target)
+                    
                     # If no meals, send polite reminder instead of summary
-                    if not items:
+                    if not get_meals_for_local_day(session, user.telegram_id, day_yesterday, user.timezone):
                         text = format_empty_day_reminder(day_str)
-                    else:
-                        total_protein = sum(int(m.protein_g) for m in meals if isinstance(m.protein_g, int))
-                        total_fat = sum(int(m.fat_g) for m in meals if isinstance(m.fat_g, int))
-                        total_carbs = sum(int(m.carbs_g) for m in meals if isinstance(m.carbs_g, int))
-                        text = format_daily_summary(date_str=day_str, items=items, total_calories=total, totals_macros=(total_protein, total_fat, total_carbs), target=user.calorie_target)
+                    
+                    # Add button to add food for previous day
+                    keyboard = InlineKeyboardMarkup([
+                        [InlineKeyboardButton(
+                            text=format_add_previous_day_button(day_str),
+                            callback_data=f"add_previous_day:{day_str}"
+                        )]
+                    ])
 
                     try:
-                        await app.bot.send_message(chat_id=user.telegram_id, text=text)
+                        await app.bot.send_message(chat_id=user.telegram_id, text=text, reply_markup=keyboard)
                         mark_summary_sent(session, user.telegram_id, day_str)
                         session.commit()
                     except Exception:
@@ -307,7 +310,7 @@ async def handle_manual_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         user, totals = get_today_totals(session, update.effective_user.id)
         if user is not None and user.calorie_target is not None:
             # This looks like a food description, process it
-            await _analyze_text_as_food(update, text)
+            await _analyze_text_as_food(update, context, text)
             return
     
     # If no calorie target set, ignore silently
@@ -427,6 +430,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await _apply_edit_to_meal(update, context)
         return
     
+    # Получаем текст подписи к фото (если есть)
+    photo_caption = (update.message.caption or "").strip()
+    
     # Отправляем сообщение о загрузке
     loading_message = await send_loading_message(update)
     
@@ -440,9 +446,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 await delete_loading_message(loading_message)
                 await update.message.reply_text("Сначала установите дневной лимит: /target.")
                 return
-        
-        # Получаем текст подписи к фото (если есть)
-        photo_caption = (update.message.caption or "").strip()
         
         # Download the highest resolution photo
         try:
@@ -474,8 +477,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         # Удаляем сообщение о загрузке перед отправкой результата
         await delete_loading_message(loading_message)
         
-        # Extract values and process the result (same as before)
-        await _process_food_analysis(update, analysis)
+        # Process the result with context
+        await _process_food_analysis(update, context, analysis)
         
     except Exception as e:
         # В случае любой ошибки удаляем сообщение о загрузке
@@ -484,7 +487,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text("Произошла ошибка при обработке фото. Попробуйте ещё раз.")
 
 
-async def _analyze_text_as_food(update: Update, text_description: str) -> None:
+async def _analyze_text_as_food(update: Update, context: ContextTypes.DEFAULT_TYPE, text_description: str) -> None:
     """Анализирует текстовое описание как еду"""
     assert update.message is not None
     assert update.effective_user is not None
@@ -503,8 +506,8 @@ async def _analyze_text_as_food(update: Update, text_description: str) -> None:
         # Удаляем сообщение о загрузке перед отправкой результата
         await delete_loading_message(loading_message)
         
-        # Process the result
-        await _process_food_analysis(update, analysis)
+        # Process the result with context
+        await _process_food_analysis(update, context, analysis)
         
     except Exception as e:
         # В случае ошибки удаляем сообщение о загрузке
@@ -513,7 +516,10 @@ async def _analyze_text_as_food(update: Update, text_description: str) -> None:
         await update.message.reply_text("Не удалось проанализировать описание. Попробуйте ещё раз.")
 
 
-async def _process_food_analysis(update: Update, analysis: dict) -> None:
+
+
+
+async def _process_food_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE, analysis: dict) -> None:
     """Общая логика обработки результата анализа еды"""
     assert update.message is not None
     assert update.effective_user is not None
@@ -552,12 +558,34 @@ async def _process_food_analysis(update: Update, analysis: dict) -> None:
         if isinstance(carbs_est, (int, float)):
             carbs_number = int(carbs_est)
 
+        # Determine target date and time
+        target_datetime_utc = datetime.now(timezone.utc)
+        is_previous_day = False
+        
+        # Check if we're adding for a previous day
+        if context.user_data.get("awaiting_previous_day_input"):
+            date_str = context.user_data.get("adding_for_date")
+            if date_str:
+                try:
+                    target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+                    # Create a datetime at noon in user's timezone for the target date
+                    tz = ZoneInfo(user.timezone)
+                    target_datetime = datetime.combine(target_date, datetime.min.time())
+                    target_datetime = tz.localize(target_datetime)
+                    # Convert to UTC
+                    target_datetime_utc = target_datetime.astimezone(timezone.utc)
+                    is_previous_day = True
+                except Exception as e:
+                    logger.exception("Failed to parse date: %s", e)
+                    await update.message.reply_text("Ошибка при обработке даты.")
+                    return
+
         # Store meal if we have calories
         if calories_number is not None:
             add_meal(
                 session=session,
                 user_id=user.telegram_id,
-                created_at_utc=datetime.now(timezone.utc),
+                created_at_utc=target_datetime_utc,
                 dish=dish,
                 portion=portion,
                 calories=calories_number,
@@ -567,11 +595,22 @@ async def _process_food_analysis(update: Update, analysis: dict) -> None:
                 raw_model_json=analysis,
             )
             session.commit()
-            # Recompute totals including this meal
-            _, totals = get_today_totals(session, update.effective_user.id)
+            
+            # Clear previous day context if we were adding for previous day
+            if is_previous_day:
+                context.user_data.pop("adding_for_date", None)
+                context.user_data.pop("awaiting_previous_day_input", None)
+                motivation = f"✅ Добавлено в статистику за {date_str}!"
+                
+                # Show updated summary for the previous day
+                await _send_summary_with_button(update, context, date_str, user)
+                return
+            else:
+                # Recompute totals including this meal for current day
+                _, totals = get_today_totals(session, update.effective_user.id)
 
         remaining = None
-        if user.calorie_target is not None and totals is not None:
+        if not is_previous_day and user.calorie_target is not None and totals is not None:
             remaining = max(user.calorie_target - totals["cal_today"], 0)
 
     reply = format_reply(
@@ -588,6 +627,52 @@ async def _process_food_analysis(update: Update, analysis: dict) -> None:
     )
 
     await update.message.reply_text(reply, parse_mode=ParseMode.MARKDOWN)
+
+
+def _build_daily_summary_text(user_id: int, target_date: date, date_str: str, timezone: str, calorie_target: Optional[int]) -> str:
+    """Строит текст сводки за день"""
+    with get_session() as session:
+        meals = get_meals_for_local_day(session, user_id, target_date, timezone)
+        items = [(m.dish, m.portion, m.calories, m.protein_g, m.fat_g, m.carbs_g) for m in meals]
+        total = get_day_total_calories(session, user_id, target_date, timezone)
+        
+        if items:
+            # Aggregate macros
+            total_protein = sum(int(m.protein_g) for m in meals if isinstance(m.protein_g, int))
+            total_fat = sum(int(m.fat_g) for m in meals if isinstance(m.fat_g, int))
+            total_carbs = sum(int(m.carbs_g) for m in meals if isinstance(m.carbs_g, int))
+            return format_daily_summary(date_str, items, total, (total_protein, total_fat, total_carbs), calorie_target)
+        else:
+            return format_daily_summary(date_str, items, total, (0, 0, 0), calorie_target)
+
+
+async def _send_summary_with_button(update: Update, context: ContextTypes.DEFAULT_TYPE, date_str: str, user) -> None:
+    """Отправляет сводку за день с кнопкой добавления еды"""
+    assert update.message is not None
+    
+    # Parse the date
+    try:
+        target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+    except Exception as e:
+        logger.exception("Failed to parse date: %s", e)
+        return
+    
+    # Build summary text using shared function
+    text = _build_daily_summary_text(user.telegram_id, target_date, date_str, user.timezone, user.calorie_target)
+    
+    # Add button to add more food for the same day
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            text=format_add_previous_day_button(date_str),
+            callback_data=f"add_previous_day:{date_str}"
+        )]
+    ])
+    
+    await update.message.reply_text(
+        f"📊 Обновленная сводка за {date_str}:\n\n{text}",
+        reply_markup=keyboard
+    )
+
 
 
 async def cmd_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -617,23 +702,16 @@ async def cmd_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     else:
         day = now_local.date()
 
+    # Use shared function to build summary text
     with get_session() as session:
         meals = get_meals_for_local_day(session, user_id, day, user.timezone)
         items = [(m.dish, m.portion, m.calories, m.protein_g, m.fat_g, m.carbs_g) for m in meals]
-        total = get_day_total_calories(session, user_id, day, user.timezone)
-        if not items:
-            # If querying today, just say there are no records yet; no reminder
-            if day == now_local.date():
-                text = "За сегодня пока нет записей."
-            else:
-                # Show regular summary with 'не зафиксировано'
-                text = format_daily_summary(day.isoformat(), items, total, (0, 0, 0), user.calorie_target)
-        else:
-            # Aggregate macros
-            total_protein = sum(int(m.protein_g) for m in meals if isinstance(m.protein_g, int))
-            total_fat = sum(int(m.fat_g) for m in meals if isinstance(m.fat_g, int))
-            total_carbs = sum(int(m.carbs_g) for m in meals if isinstance(m.carbs_g, int))
-            text = format_daily_summary(day.isoformat(), items, total, (total_protein, total_fat, total_carbs), user.calorie_target)
+    
+    if not items and day == now_local.date():
+        # If querying today with no records, show simple message
+        text = "За сегодня пока нет записей."
+    else:
+        text = _build_daily_summary_text(user_id, day, day.isoformat(), user.timezone, user.calorie_target)
 
     await update.message.reply_text(text)
 
@@ -749,6 +827,47 @@ async def handle_abort(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     context.user_data["awaiting_edit_input"] = False
     if query.message:
         await query.message.reply_text("Действие отменено.")
+
+
+async def handle_add_previous_day(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик кнопки добавления еды за прошедший день"""
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    
+    data = query.data or ""
+    if not data.startswith("add_previous_day:"):
+        return
+    
+    date_str = data.split(":", 1)[1] if ":" in data else ""
+    if not date_str:
+        return
+    
+    # Сохраняем дату в контексте пользователя
+    context.user_data["adding_for_date"] = date_str
+    context.user_data["awaiting_previous_day_input"] = True
+    
+    if query.message:
+        # Показываем текущую сводку за этот день перед запросом добавления
+        try:
+            target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+            with get_session() as session:
+                user = get_or_create_user(session, update.effective_user.id, DEFAULT_TZ)
+            
+            current_summary = _build_daily_summary_text(user.telegram_id, target_date, date_str, user.timezone, user.calorie_target)
+            
+            await query.message.reply_text(
+                f"📊 Текущая сводка за {date_str}:\n\n{current_summary}\n\n"
+                f"Отправьте фото еды или описание блюда, которое вы ели {date_str}.\n"
+                "Я добавлю его в статистику за этот день."
+            )
+        except Exception as e:
+            logger.exception("Failed to show current summary: %s", e)
+            await query.message.reply_text(
+                f"Отправьте фото еды или описание блюда, которое вы ели {date_str}.\n"
+                "Я добавлю его в статистику за этот день."
+            )
 
 
 async def _apply_edit_to_meal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -908,6 +1027,7 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(handle_cancel_choice, pattern=r"^cancel:meal:\d+$"))
     application.add_handler(CallbackQueryHandler(handle_edit_choice, pattern=r"^edit:meal:\d+$"))
     application.add_handler(CallbackQueryHandler(handle_abort, pattern=r"^abort$"))
+    application.add_handler(CallbackQueryHandler(handle_add_previous_day, pattern=r"^add_previous_day:.*$"))
     # Edit input is intercepted in handle_manual_input/handle_photo when awaiting edit
 
     # Start the daily summary worker

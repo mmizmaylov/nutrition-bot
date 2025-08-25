@@ -135,4 +135,9 @@ def format_deleted_confirmation() -> str:
 
 
 def format_updated_confirmation() -> str:
-    return "✅ Запись обновлена." 
+    return "✅ Запись обновлена."
+
+
+def format_add_previous_day_button(date_str: str) -> str:
+    """Форматирует кнопку для добавления еды за прошедший день"""
+    return f"➕ Добавить еду за {date_str}" 
