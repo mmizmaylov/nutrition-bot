@@ -570,10 +570,10 @@ async def _process_food_analysis(update: Update, context: ContextTypes.DEFAULT_T
             if date_str:
                 try:
                     target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-                    # Create a datetime at noon in user's timezone for the target date
+                    # Create a datetime at midnight in user's timezone for the target date
                     tz = ZoneInfo(user.timezone)
                     target_datetime = datetime.combine(target_date, datetime.min.time())
-                    target_datetime = tz.localize(target_datetime)
+                    target_datetime = target_datetime.replace(tzinfo=tz)
                     # Convert to UTC
                     target_datetime_utc = target_datetime.astimezone(timezone.utc)
                     is_previous_day = True
@@ -851,25 +851,11 @@ async def handle_add_previous_day(update: Update, context: ContextTypes.DEFAULT_
     context.user_data["awaiting_previous_day_input"] = True
     
     if query.message:
-        # Показываем текущую сводку за этот день перед запросом добавления
-        try:
-            target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-            with get_session() as session:
-                user = get_or_create_user(session, update.effective_user.id, DEFAULT_TZ)
-            
-            current_summary = _build_daily_summary_text(user.telegram_id, target_date, date_str, user.timezone, user.calorie_target)
-            
-            await query.message.reply_text(
-                f"📊 Текущая сводка за {date_str}:\n\n{current_summary}\n\n"
-                f"Отправьте фото еды или описание блюда, которое вы ели {date_str}.\n"
-                "Я добавлю его в статистику за этот день."
-            )
-        except Exception as e:
-            logger.exception("Failed to show current summary: %s", e)
-            await query.message.reply_text(
-                f"Отправьте фото еды или описание блюда, которое вы ели {date_str}.\n"
-                "Я добавлю его в статистику за этот день."
-            )
+        # Отправляем короткое сообщение с просьбой добавить еду
+        await query.message.reply_text(
+            f"Отправьте фото еды или описание блюда, которое вы ели {date_str}.\n"
+            "Я добавлю его в статистику за этот день."
+        )
 
 
 async def _apply_edit_to_meal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
