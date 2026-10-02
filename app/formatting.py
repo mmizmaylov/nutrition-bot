@@ -3,6 +3,32 @@ from datetime import date
 from typing import Optional, Union
 
 from app.reminders import EMPTY_DAY_REMINDERS
+from app.summary_phrases import (
+    SUMMARY_BULLSEYE,
+    SUMMARY_NO_TARGET,
+    SUMMARY_OVER,
+    SUMMARY_UNDER,
+    SUMMARY_WITHIN,
+)
+
+# Отклонение от цели (ккал), при котором день считается попаданием «почти точно в цель»
+BULLSEYE_KCAL = 50
+# Доля цели, ниже которой завершенный день считается недобором
+UNDER_TARGET_SHARE = 0.5
+
+
+def _pick_daily_phrase(pool: tuple[str, ...], date_str: str, user_id: Optional[int], key: str) -> str:
+    """Выбирает фразу из пула на указанный день.
+
+    Для каждого пользователя фразы перемешиваются в свой порядок и идут по дням,
+    поэтому внутри цикла из len(pool) дней ни одна не повторяется.
+    """
+    if user_id is None:
+        return random.choice(pool)
+    cycle, position = divmod(date.fromisoformat(date_str).toordinal(), len(pool))
+    order = list(range(len(pool)))
+    random.Random(f"{user_id}:{key}:{cycle}").shuffle(order)
+    return pool[order[position]]
 
 
 def _health_to_stars(health_score: Optional[Union[int, float, str]]) -> str:
@@ -70,6 +96,8 @@ def format_daily_summary(
     total_calories: int,
     totals_macros: Optional[tuple[int, int, int]],
     target: Optional[int],
+    user_id: Optional[int] = None,
+    day_finished: bool = True,
 ) -> str:
     header = [
         f"📅 Итоги дня — {date_str}",
@@ -104,30 +132,28 @@ def format_daily_summary(
     footer: list[str] = []
     if isinstance(target, int):
         delta = target - total_calories
-        if delta >= 0:
+        if abs(delta) <= BULLSEYE_KCAL:
+            rest = f"осталось {delta} ккал" if delta >= 0 else f"перебор всего {abs(delta)} ккал"
+            footer.append(f"🎯 Почти точно в цель: {rest}")
+            footer.append(_pick_daily_phrase(SUMMARY_BULLSEYE, date_str, user_id, "bullseye"))
+        elif delta > 0 and day_finished and total_calories < target * UNDER_TARGET_SHARE:
+            footer.append(f"🔻 Меньше половины цели: осталось {delta} ккал")
+            footer.append(_pick_daily_phrase(SUMMARY_UNDER, date_str, user_id, "under"))
+        elif delta > 0:
             footer.append(f"✅ В пределах цели: осталось {delta} ккал")
-            footer.append("👏 Отличная дисциплина! Продолжай в том же духе — стабильность важнее идеальности.")
+            footer.append(_pick_daily_phrase(SUMMARY_WITHIN, date_str, user_id, "within"))
         else:
             footer.append(f"⚠️ Перебор на {abs(delta)} ккал")
-            footer.append("💪 Ничего страшного! Компенсируй сегодня дополнительной активностью, а завтра добавь больше овощей и лёгких блюд.")
+            footer.append(_pick_daily_phrase(SUMMARY_OVER, date_str, user_id, "over"))
     else:
-        footer.append("ℹ️ Цель на день не установлена. Укажи через /target")
+        footer.append(_pick_daily_phrase(SUMMARY_NO_TARGET, date_str, user_id, "no_target"))
 
     return "\n".join(header + lines + totals + [""] + footer)
 
 
 def format_empty_day_reminder(date_str: str, user_id: Optional[int] = None) -> str:
-    """Возвращает случайное напоминание о пустом дне.
-
-    Для каждого пользователя тексты перемешиваются в свой порядок и идут по дням,
-    поэтому внутри цикла из len(EMPTY_DAY_REMINDERS) дней ни один не повторяется.
-    """
-    if user_id is None:
-        return random.choice(EMPTY_DAY_REMINDERS)
-    cycle, position = divmod(date.fromisoformat(date_str).toordinal(), len(EMPTY_DAY_REMINDERS))
-    order = list(range(len(EMPTY_DAY_REMINDERS)))
-    random.Random(f"{user_id}:{cycle}").shuffle(order)
-    return EMPTY_DAY_REMINDERS[order[position]]
+    """Возвращает случайное напоминание о дне без записей."""
+    return _pick_daily_phrase(EMPTY_DAY_REMINDERS, date_str, user_id, "empty")
 
 
 def format_meal_button_label(dish: str, portion: Optional[str], calories: Optional[int]) -> str:

@@ -631,7 +631,7 @@ async def _process_food_analysis(update: Update, context: ContextTypes.DEFAULT_T
     await update.message.reply_text(reply, parse_mode=ParseMode.MARKDOWN)
 
 
-def _build_daily_summary_text(user_id: int, target_date: date, date_str: str, timezone: str, calorie_target: Optional[int]) -> str:
+def _build_daily_summary_text(user_id: int, target_date: date, date_str: str, timezone: str, calorie_target: Optional[int], day_finished: bool = True) -> str:
     """Строит текст сводки за день"""
     with get_session() as session:
         meals = get_meals_for_local_day(session, user_id, target_date, timezone)
@@ -643,9 +643,9 @@ def _build_daily_summary_text(user_id: int, target_date: date, date_str: str, ti
             total_protein = sum(int(m.protein_g) for m in meals if isinstance(m.protein_g, int))
             total_fat = sum(int(m.fat_g) for m in meals if isinstance(m.fat_g, int))
             total_carbs = sum(int(m.carbs_g) for m in meals if isinstance(m.carbs_g, int))
-            return format_daily_summary(date_str, items, total, (total_protein, total_fat, total_carbs), calorie_target)
+            return format_daily_summary(date_str, items, total, (total_protein, total_fat, total_carbs), calorie_target, user_id, day_finished)
         else:
-            return format_daily_summary(date_str, items, total, (0, 0, 0), calorie_target)
+            return format_daily_summary(date_str, items, total, (0, 0, 0), calorie_target, user_id, day_finished)
 
 
 async def _send_summary_with_button(update: Update, context: ContextTypes.DEFAULT_TYPE, date_str: str, user) -> None:
@@ -713,7 +713,10 @@ async def cmd_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         # If querying today with no records, show simple message
         text = "За сегодня пока нет записей."
     else:
-        text = _build_daily_summary_text(user_id, day, day.isoformat(), user.timezone, user.calorie_target)
+        text = _build_daily_summary_text(
+            user_id, day, day.isoformat(), user.timezone, user.calorie_target,
+            day_finished=day < now_local.date(),
+        )
 
     await update.message.reply_text(text)
 
