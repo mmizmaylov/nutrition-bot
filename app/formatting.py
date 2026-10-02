@@ -2,7 +2,20 @@ import random
 from datetime import date
 from typing import Optional, Union
 
+from app.meal_phrases import (
+    MEAL_BULLSEYE,
+    MEAL_CLOSE,
+    MEAL_JUST_OVER,
+    MEAL_PLENTY,
+    MEAL_STILL_OVER,
+)
 from app.reminders import EMPTY_DAY_REMINDERS
+from app.service_phrases import (
+    CANCELLED_CONFIRMATIONS,
+    DELETED_CONFIRMATIONS,
+    LOADING_MESSAGES,
+    LOW_QUALITY_MESSAGES,
+)
 from app.summary_phrases import (
     SUMMARY_BULLSEYE,
     SUMMARY_NO_TARGET,
@@ -15,6 +28,20 @@ from app.summary_phrases import (
 BULLSEYE_KCAL = 50
 # Доля цели, ниже которой завершенный день считается недобором
 UNDER_TARGET_SHARE = 0.5
+# Доля цели, выше которой остаток после приема пищи считается большим запасом
+MEAL_PLENTY_SHARE = 0.4
+
+# Последняя показанная фраза для пары (пользователь, пул), чтобы не повторять ее подряд.
+# Хранится в памяти процесса и сбрасывается при перезапуске бота.
+_last_phrases: dict[tuple[Optional[int], str], str] = {}
+
+
+def _pick_fresh_phrase(pool: tuple[str, ...], user_id: Optional[int], key: str) -> str:
+    """Выбирает случайную фразу из пула, не повторяя предыдущую для этого пользователя."""
+    last = _last_phrases.get((user_id, key))
+    phrase = random.choice([p for p in pool if p != last] or pool)
+    _last_phrases[(user_id, key)] = phrase
+    return phrase
 
 
 def _pick_daily_phrase(pool: tuple[str, ...], date_str: str, user_id: Optional[int], key: str) -> str:
@@ -53,6 +80,7 @@ def format_reply(
     recommendation: str,
     remaining: Optional[int],
     motivation: str,
+    remaining_phrase: Optional[str] = None,
 ) -> str:
     cal_str = f"{calories} ккал" if calories is not None else "—"
     remaining_str = f"{remaining} ккал" if remaining is not None else "—"
@@ -87,7 +115,45 @@ def format_reply(
         "",
         f"⚖️ Остаток на день: {remaining_str}",
     ]
+    if remaining_phrase:
+        lines.append(remaining_phrase)
     return "\n".join(lines)
+
+
+def format_meal_phrase(
+    target: Optional[int],
+    total_calories: int,
+    meal_calories: Optional[int],
+    user_id: Optional[int] = None,
+) -> Optional[str]:
+    """Возвращает фразу под остатком на день после приема пищи.
+
+    total_calories уже включает это блюдо, meal_calories нужен, чтобы понять,
+    перешел ли пользователь лимит именно им.
+    """
+    if target is None:
+        return None
+    delta = target - total_calories
+    if abs(delta) <= BULLSEYE_KCAL:
+        pool, key = MEAL_BULLSEYE, "meal_bullseye"
+    elif delta < 0:
+        if delta + (meal_calories or 0) >= 0:
+            pool, key = MEAL_JUST_OVER, "meal_just_over"
+        else:
+            pool, key = MEAL_STILL_OVER, "meal_still_over"
+    elif delta > target * MEAL_PLENTY_SHARE:
+        pool, key = MEAL_PLENTY, "meal_plenty"
+    else:
+        pool, key = MEAL_CLOSE, "meal_close"
+    return _pick_fresh_phrase(pool, user_id, key)
+
+
+def format_loading_message(user_id: Optional[int] = None) -> str:
+    return _pick_fresh_phrase(LOADING_MESSAGES, user_id, "loading")
+
+
+def format_low_quality_message(user_id: Optional[int] = None) -> str:
+    return _pick_fresh_phrase(LOW_QUALITY_MESSAGES, user_id, "low_quality")
 
 
 def format_daily_summary(
@@ -165,8 +231,12 @@ def format_meal_button_label(dish: str, portion: Optional[str], calories: Option
     return (dish or "").strip()
 
 
-def format_deleted_confirmation() -> str:
-    return "🗑️ Блюдо удалено из дневной статистики."
+def format_deleted_confirmation(user_id: Optional[int] = None) -> str:
+    return _pick_fresh_phrase(DELETED_CONFIRMATIONS, user_id, "deleted")
+
+
+def format_cancelled_confirmation(user_id: Optional[int] = None) -> str:
+    return _pick_fresh_phrase(CANCELLED_CONFIRMATIONS, user_id, "cancelled")
 
 
 def format_updated_confirmation() -> str:

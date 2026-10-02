@@ -2,7 +2,6 @@ import asyncio
 import base64
 import logging
 import os
-import random
 from datetime import datetime, timezone, timedelta, date
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -25,8 +24,12 @@ from app.formatting import (
     format_empty_day_reminder,
     format_meal_button_label,
     format_deleted_confirmation,
+    format_cancelled_confirmation,
     format_updated_confirmation,
     format_add_previous_day_button,
+    format_loading_message,
+    format_low_quality_message,
+    format_meal_phrase,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -35,25 +38,14 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 DEFAULT_TZ = os.getenv("DEFAULT_TIMEZONE", "Europe/Moscow")
 
-# Варианты сообщений о загрузке
-LOADING_MESSAGES = [
-    "🤔 Анализирую...",
-    "🔍 Изучаю блюдо...",
-    "⚡ Обрабатываю данные...",
-    "🧠 Думаю...",
-    "📊 Считаю калории...",
-    "🔄 Анализирую питательность...",
-    "⏳ Секундочку...",
-    "🎯 Определяю состав...",
-]
-
 async def send_loading_message(update: Update) -> Message | None:
     """Отправляет случайное сообщение о загрузке"""
     if not update.message:
         return None
     
     try:
-        loading_text = random.choice(LOADING_MESSAGES)
+        user_id = update.effective_user.id if update.effective_user else None
+        loading_text = format_loading_message(user_id)
         loading_message = await update.message.reply_text(loading_text)
         return loading_message
     except Exception as e:
@@ -540,10 +532,7 @@ async def _process_food_analysis(update: Update, context: ContextTypes.DEFAULT_T
     with get_session() as session:
         user, totals = get_today_totals(session, update.effective_user.id)
         if low_quality:
-            reply_text = (
-                "Сложно распознать или проанализировать. Пожалуйста, добавьте более подробное описание или сделайте фото при лучшем освещении."
-            )
-            await update.message.reply_text(reply_text)
+            await update.message.reply_text(format_low_quality_message(update.effective_user.id))
             return
 
         calories_number = None
@@ -612,8 +601,12 @@ async def _process_food_analysis(update: Update, context: ContextTypes.DEFAULT_T
                 _, totals = get_today_totals(session, update.effective_user.id)
 
         remaining = None
+        remaining_phrase = None
         if not is_previous_day and user.calorie_target is not None and totals is not None:
             remaining = max(user.calorie_target - totals["cal_today"], 0)
+            remaining_phrase = format_meal_phrase(
+                user.calorie_target, totals["cal_today"], calories_number, update.effective_user.id
+            )
 
     reply = format_reply(
         dish=dish,
@@ -626,6 +619,7 @@ async def _process_food_analysis(update: Update, context: ContextTypes.DEFAULT_T
         recommendation=recommendation,
         remaining=remaining,
         motivation=motivation,
+        remaining_phrase=remaining_phrase,
     )
 
     await update.message.reply_text(reply, parse_mode=ParseMode.MARKDOWN)
@@ -778,7 +772,7 @@ async def handle_cancel_choice(update: Update, context: ContextTypes.DEFAULT_TYP
         if ok:
             session.commit()
     if query.message:
-        await query.message.reply_text(format_deleted_confirmation())
+        await query.message.reply_text(format_deleted_confirmation(user.id))
 
 
 async def cmd_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -831,7 +825,8 @@ async def handle_abort(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     context.user_data["editing_meal_id"] = None
     context.user_data["awaiting_edit_input"] = False
     if query.message:
-        await query.message.reply_text("Действие отменено.")
+        user_id = update.effective_user.id if update.effective_user else None
+        await query.message.reply_text(format_cancelled_confirmation(user_id))
 
 
 async def handle_add_previous_day(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -937,8 +932,12 @@ async def _apply_edit_to_meal(update: Update, context: ContextTypes.DEFAULT_TYPE
         # Recompute today's totals and fetch user to calculate remaining
         user, totals = get_today_totals(session, update.effective_user.id)
         remaining = None
+        remaining_phrase = None
         if user and user.calorie_target is not None and totals is not None:
             remaining = max(user.calorie_target - totals.get("cal_today", 0), 0)
+            remaining_phrase = format_meal_phrase(
+                user.calorie_target, totals.get("cal_today", 0), meal.calories, update.effective_user.id
+            )
 
         # Use updated fields from DB to render reply
         final_dish = meal.dish
@@ -968,6 +967,7 @@ async def _apply_edit_to_meal(update: Update, context: ContextTypes.DEFAULT_TYPE
         recommendation=recommendation,
         remaining=remaining,
         motivation=motivation,
+        remaining_phrase=remaining_phrase,
     )
 
     if update.message:
