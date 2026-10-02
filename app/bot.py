@@ -33,6 +33,8 @@ from app.formatting import (
 )
 
 logging.basicConfig(level=logging.INFO)
+# httpx на уровне INFO пишет URL каждого запроса, а в URL к Telegram API есть токен бота
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 load_dotenv()
