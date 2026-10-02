@@ -129,24 +129,29 @@ def format_daily_summary(
         tp, tf, tc = totals_macros
         totals.append(f"📊 КБЖУ за день: Б:{tp}г · Ж:{tf}г · У:{tc}г")
 
+    # Шуточная фраза добавляется только к итогам завершенного дня
     footer: list[str] = []
     if isinstance(target, int):
         delta = target - total_calories
         if abs(delta) <= BULLSEYE_KCAL:
             rest = f"осталось {delta} ккал" if delta >= 0 else f"перебор всего {abs(delta)} ккал"
             footer.append(f"🎯 Почти точно в цель: {rest}")
-            footer.append(_pick_daily_phrase(SUMMARY_BULLSEYE, date_str, user_id, "bullseye"))
+            pool, key = SUMMARY_BULLSEYE, "bullseye"
         elif delta > 0 and day_finished and total_calories < target * UNDER_TARGET_SHARE:
             footer.append(f"🔻 Меньше половины цели: осталось {delta} ккал")
-            footer.append(_pick_daily_phrase(SUMMARY_UNDER, date_str, user_id, "under"))
+            pool, key = SUMMARY_UNDER, "under"
         elif delta > 0:
             footer.append(f"✅ В пределах цели: осталось {delta} ккал")
-            footer.append(_pick_daily_phrase(SUMMARY_WITHIN, date_str, user_id, "within"))
+            pool, key = SUMMARY_WITHIN, "within"
         else:
             footer.append(f"⚠️ Перебор на {abs(delta)} ккал")
-            footer.append(_pick_daily_phrase(SUMMARY_OVER, date_str, user_id, "over"))
+            pool, key = SUMMARY_OVER, "over"
     else:
-        footer.append(_pick_daily_phrase(SUMMARY_NO_TARGET, date_str, user_id, "no_target"))
+        if not day_finished:
+            footer.append("ℹ️ Цель на день не установлена. Укажи через /target")
+        pool, key = SUMMARY_NO_TARGET, "no_target"
+    if day_finished:
+        footer.append(_pick_daily_phrase(pool, date_str, user_id, key))
 
     return "\n".join(header + lines + totals + [""] + footer)
 
