@@ -163,7 +163,7 @@ async def daily_summary_worker(app: Application) -> None:
                     
                     # If no meals, send polite reminder instead of summary
                     if not get_meals_for_local_day(session, user.telegram_id, day_yesterday, user.timezone):
-                        text = format_empty_day_reminder(day_str)
+                        text = format_empty_day_reminder(day_str, user.telegram_id)
                     
                     # Add button to add food for previous day
                     keyboard = InlineKeyboardMarkup([

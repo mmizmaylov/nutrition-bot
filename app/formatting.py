@@ -1,4 +1,8 @@
+import random
+from datetime import date
 from typing import Optional, Union
+
+from app.reminders import EMPTY_DAY_REMINDERS
 
 
 def _health_to_stars(health_score: Optional[Union[int, float, str]]) -> str:
@@ -112,18 +116,18 @@ def format_daily_summary(
     return "\n".join(header + lines + totals + [""] + footer)
 
 
-def format_empty_day_reminder(date_str: str) -> str:
-    lines = [
-        "📝 Небольшое напоминание",
-        f"За {date_str} записей о приёмах пищи не найдено.",
-        "",
-        "Чтобы я помогал точнее, просто отправляй в течение дня:",
-        "• фото блюда, или",
-        "• короткое описание (например, «200 г риса»).",
-        "",
-        "Я посчитаю калории и подскажу, сколько осталось на день 💪",
-    ]
-    return "\n".join(lines)
+def format_empty_day_reminder(date_str: str, user_id: Optional[int] = None) -> str:
+    """Возвращает случайное напоминание о пустом дне.
+
+    Для каждого пользователя тексты перемешиваются в свой порядок и идут по дням,
+    поэтому внутри цикла из len(EMPTY_DAY_REMINDERS) дней ни один не повторяется.
+    """
+    if user_id is None:
+        return random.choice(EMPTY_DAY_REMINDERS)
+    cycle, position = divmod(date.fromisoformat(date_str).toordinal(), len(EMPTY_DAY_REMINDERS))
+    order = list(range(len(EMPTY_DAY_REMINDERS)))
+    random.Random(f"{user_id}:{cycle}").shuffle(order)
+    return EMPTY_DAY_REMINDERS[order[position]]
 
 
 def format_meal_button_label(dish: str, portion: Optional[str], calories: Optional[int]) -> str:
