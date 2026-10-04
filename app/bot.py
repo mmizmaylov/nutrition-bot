@@ -27,6 +27,7 @@ from app.formatting import (
     format_cancelled_confirmation,
     format_updated_confirmation,
     format_add_previous_day_button,
+    format_day,
     format_loading_message,
     format_low_quality_message,
     format_meal_phrase,
@@ -593,8 +594,6 @@ async def _process_food_analysis(update: Update, context: ContextTypes.DEFAULT_T
             if is_previous_day:
                 context.user_data.pop("adding_for_date", None)
                 context.user_data.pop("awaiting_previous_day_input", None)
-                motivation = f"✅ Добавлено в статистику за {date_str}!"
-                
                 # Show updated summary for the previous day
                 await _send_summary_with_button(update, context, date_str, user)
                 return
@@ -667,7 +666,7 @@ async def _send_summary_with_button(update: Update, context: ContextTypes.DEFAUL
     ])
     
     await update.message.reply_text(
-        f"📊 Обновленная сводка за {date_str}:\n\n{text}",
+        f"📊 Обновленная сводка:\n\n{text}",
         reply_markup=keyboard
     )
 
@@ -853,7 +852,7 @@ async def handle_add_previous_day(update: Update, context: ContextTypes.DEFAULT_
     if query.message:
         # Отправляем короткое сообщение с просьбой добавить еду
         await query.message.reply_text(
-            f"Отправьте фото еды или описание блюда, которое вы ели {date_str}.\n"
+            f"Отправьте фото еды или описание блюда, которое вы ели {format_day(date_str)}.\n"
             "Я добавлю его в статистику за этот день."
         )
 

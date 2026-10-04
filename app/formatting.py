@@ -31,6 +31,12 @@ UNDER_TARGET_SHARE = 0.5
 # Доля цели, выше которой остаток после приема пищи считается большим запасом
 MEAL_PLENTY_SHARE = 0.4
 
+_MONTHS_GENITIVE = (
+    "января", "февраля", "марта", "апреля", "мая", "июня",
+    "июля", "августа", "сентября", "октября", "ноября", "декабря",
+)
+_WEEKDAYS = ("понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье")
+
 # Последняя показанная фраза для пары (пользователь, пул), чтобы не повторять ее подряд.
 # Хранится в памяти процесса и сбрасывается при перезапуске бота.
 _last_phrases: dict[tuple[Optional[int], str], str] = {}
@@ -42,6 +48,20 @@ def _pick_fresh_phrase(pool: tuple[str, ...], user_id: Optional[int], key: str) 
     phrase = random.choice([p for p in pool if p != last] or pool)
     _last_phrases[(user_id, key)] = phrase
     return phrase
+
+
+def format_day(date_str: str, with_weekday: bool = False) -> str:
+    """Форматирует ISO-дату для пользователя: «4 октября», «суббота, 4 октября».
+
+    Год добавляется, только если он отличается от текущего.
+    """
+    day = date.fromisoformat(date_str)
+    text = f"{day.day} {_MONTHS_GENITIVE[day.month - 1]}"
+    if day.year != date.today().year:
+        text += f" {day.year}"
+    if with_weekday:
+        text = f"{_WEEKDAYS[day.weekday()]}, {text}"
+    return text
 
 
 def _pick_daily_phrase(pool: tuple[str, ...], date_str: str, user_id: Optional[int], key: str) -> str:
@@ -166,7 +186,7 @@ def format_daily_summary(
     day_finished: bool = True,
 ) -> str:
     header = [
-        f"📅 Итоги дня — {date_str}",
+        f"📅 Итоги дня — {format_day(date_str, with_weekday=True)}",
         "",
     ]
 
@@ -245,4 +265,4 @@ def format_updated_confirmation() -> str:
 
 def format_add_previous_day_button(date_str: str) -> str:
     """Форматирует кнопку для добавления еды за прошедший день"""
-    return f"➕ Добавить еду за {date_str}" 
+    return f"➕ Добавить еду за {format_day(date_str)}"
