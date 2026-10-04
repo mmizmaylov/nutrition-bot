@@ -10,6 +10,7 @@ import re
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from telegram.constants import ParseMode
+from telegram.error import NetworkError
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, CallbackQueryHandler, filters
 
 from app.db import get_session, init_db, get_or_create_user, set_user_calorie_target, set_user_timezone, get_today_totals
@@ -987,6 +988,16 @@ async def handle_edit_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await handle_photo(update, context)
 
 
+async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Логирует ошибки обработчиков и polling: сетевые сбои одной строкой, остальные с трейсбеком."""
+    err = context.error
+    if isinstance(err, NetworkError):
+        # Временные обрывы соединения с Telegram, библиотека сама повторяет запрос
+        logger.warning("Telegram network error: %s", err)
+        return
+    logger.error("Unhandled error while processing update", exc_info=err)
+
+
 def main() -> None:
     init_db()
     token = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -1021,6 +1032,8 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(handle_abort, pattern=r"^abort$"))
     application.add_handler(CallbackQueryHandler(handle_add_previous_day, pattern=r"^add_previous_day:.*$"))
     # Edit input is intercepted in handle_manual_input/handle_photo when awaiting edit
+
+    application.add_error_handler(handle_error)
 
     # Start the daily summary worker
     asyncio.get_event_loop().create_task(daily_summary_worker(application))
