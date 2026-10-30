@@ -17,6 +17,7 @@ from app.db import get_session, init_db, get_or_create_user, set_user_calorie_ta
 from app.db import add_meal
 from app.db import get_all_users, get_meals_for_local_day, get_day_total_calories, has_summary_sent, mark_summary_sent
 from app.db import get_meal_by_id, delete_meal_by_id
+from app.db import get_usage_stats
 from app.vision_providers.openai_provider import analyze_meal
 from app.prompt import build_system_prompt
 from app.formatting import (
@@ -41,6 +42,8 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 DEFAULT_TZ = os.getenv("DEFAULT_TIMEZONE", "Europe/Moscow")
+# Telegram ID администраторов через запятую, им доступна команда /stats
+ADMIN_IDS = {int(x) for x in re.split(r"[,\s]+", os.getenv("ADMIN_IDS", "")) if x.strip().isdigit()}
 
 async def send_loading_message(update: Update) -> Message | None:
     """Отправляет случайное сообщение о загрузке"""
@@ -417,6 +420,43 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"Остаток на сегодня: {remaining} ккал\n"
         f"Часовой пояс: {user.timezone}"
     )
+
+
+async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Статистика использования бота, только для администраторов из ADMIN_IDS."""
+    assert update.message is not None
+    assert update.effective_user is not None
+    if update.effective_user.id not in ADMIN_IDS:
+        logger.info("Ignoring /stats from non-admin user %s", update.effective_user.id)
+        return
+    with get_session() as session:
+        stats = get_usage_stats(session, datetime.now(timezone.utc))
+    tz = ZoneInfo(DEFAULT_TZ)
+    lines = [
+        "📊 Статистика бота",
+        "",
+        f"Пользователей всего: {stats.users_total}",
+        f"С заданным лимитом: {stats.users_with_target}",
+        f"Записали хотя бы один прием пищи: {stats.users_with_meals}",
+        "",
+        "Активные (был прием пищи):",
+        f"  за 24 часа: {stats.active_today}",
+        f"  за 7 дней: {stats.active_7d}",
+        f"  за 30 дней: {stats.active_30d}",
+        "",
+        "Новые (первый прием пищи):",
+        f"  за 7 дней: {stats.new_7d}",
+        f"  за 30 дней: {stats.new_30d}",
+        "",
+        f"Приемов пищи всего: {stats.meals_total}, за 7 дней: {stats.meals_7d}",
+    ]
+    if stats.top_30d:
+        lines += ["", "Топ за 30 дней (ID: записей, последняя активность):"]
+        for i, u in enumerate(stats.top_30d, 1):
+            # SQLite возвращает наивное время, храним его в UTC
+            last_local = u.last_seen_utc.replace(tzinfo=timezone.utc).astimezone(tz)
+            lines.append(f"{i}. {u.telegram_id}: {u.meals}, {last_local:%d.%m %H:%M}")
+    await update.message.reply_text("\n".join(lines))
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1020,6 +1060,7 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(handle_tz_choice, pattern=r"^tz:.*$"))
 
     application.add_handler(CommandHandler("status", cmd_status))
+    application.add_handler(CommandHandler("stats", cmd_stats))
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
     application.add_handler(CommandHandler("summary", cmd_summary))

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import Any, Dict, Optional, Tuple
 from zoneinfo import ZoneInfo
 
@@ -238,3 +238,71 @@ def delete_meal_by_id(session: Session, meal_id: int, user_id: int) -> bool:
         return False
     session.delete(meal)
     return True 
+
+# Admin stats
+@dataclass
+class TopUser:
+    telegram_id: int
+    meals: int
+    last_seen_utc: datetime
+
+
+@dataclass
+class UsageStats:
+    users_total: int
+    users_with_target: int
+    users_with_meals: int
+    active_today: int
+    active_7d: int
+    active_30d: int
+    new_7d: int
+    new_30d: int
+    meals_total: int
+    meals_7d: int
+    top_30d: list[TopUser]
+
+
+def get_usage_stats(session: Session, now_utc: datetime, top_limit: int = 10) -> UsageStats:
+    day_ago = now_utc - timedelta(days=1)
+    week_ago = now_utc - timedelta(days=7)
+    month_ago = now_utc - timedelta(days=30)
+
+    def active_since(since: datetime) -> int:
+        q = select(func.count(func.distinct(Meal.user_id))).where(Meal.created_at_utc >= since)
+        return int(session.execute(q).scalar_one() or 0)
+
+    # Регистрацию в базе не храним, поэтому "новый" пользователь = первый прием пищи в периоде
+    first_meal = (
+        select(Meal.user_id, func.min(Meal.created_at_utc).label("first_at"))
+        .group_by(Meal.user_id)
+        .subquery()
+    )
+
+    def new_since(since: datetime) -> int:
+        q = select(func.count()).select_from(first_meal).where(first_meal.c.first_at >= since)
+        return int(session.execute(q).scalar_one() or 0)
+
+    top_q = (
+        select(Meal.user_id, func.count(Meal.id), func.max(Meal.created_at_utc))
+        .where(Meal.created_at_utc >= month_ago)
+        .group_by(Meal.user_id)
+        .order_by(func.count(Meal.id).desc(), func.max(Meal.created_at_utc).desc())
+        .limit(top_limit)
+    )
+    top = [TopUser(telegram_id=uid, meals=int(cnt), last_seen_utc=last) for uid, cnt, last in session.execute(top_q).all()]
+
+    return UsageStats(
+        users_total=int(session.execute(select(func.count(User.telegram_id))).scalar_one() or 0),
+        users_with_target=int(
+            session.execute(select(func.count(User.telegram_id)).where(User.calorie_target.is_not(None))).scalar_one() or 0
+        ),
+        users_with_meals=int(session.execute(select(func.count(func.distinct(Meal.user_id)))).scalar_one() or 0),
+        active_today=active_since(day_ago),
+        active_7d=active_since(week_ago),
+        active_30d=active_since(month_ago),
+        new_7d=new_since(week_ago),
+        new_30d=new_since(month_ago),
+        meals_total=int(session.execute(select(func.count(Meal.id))).scalar_one() or 0),
+        meals_7d=int(session.execute(select(func.count(Meal.id)).where(Meal.created_at_utc >= week_ago)).scalar_one() or 0),
+        top_30d=top,
+    )

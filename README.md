@@ -12,6 +12,7 @@
 - Анализ через OpenAI Vision (gpt-4o-mini по умолчанию)
 - Хранение дневного потребления в SQLite
 - Команды: `/start`, `/target`, `/timezone [TZID]`, `/status`
+- Админская команда `/stats`: сколько пользователей, активность за 24 часа, 7 и 30 дней, новые пользователи и топ по записям. Работает только для ID из `ADMIN_IDS`, остальным бот не отвечает. Свой ID можно узнать, например, у @userinfobot
 
 #### Альтернативы API распознавания
 - OpenAI GPT-4o/4o-mini (в коде по умолчанию)
@@ -36,6 +37,7 @@ TELEGRAM_BOT_TOKEN=...  # токен бота
 OPENAI_API_KEY=...      # ключ OpenAI
 OPENAI_VISION_MODEL=gpt-4o-mini  # опционально
 DEFAULT_TIMEZONE=Europe/Moscow   # опционально
+ADMIN_IDS=123456789              # опционально, Telegram ID админов через запятую (для /stats)
 ```
 
 4) Запуск бота:
